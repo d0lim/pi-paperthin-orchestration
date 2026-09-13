@@ -26,16 +26,24 @@ Pi 입력창에서 연결 상태를 확인한다.
 /workflow
 ~~~
 
+확인 후 같은 Pi에서 Lead에게 작업을 요청한다.
+
+~~~text
+/lead .workflow/briefs/add-delete.md를 구현하고 리뷰·테스트까지 진행해줘
+~~~
+
+`/workflow`는 상태 확인이고 `/lead <요청>`은 현재 Lead에게 보내는 작업 요청이다. `/lead`만 입력하면 여러 줄 요청을 작성하는 편집기가 열린다. 취소하면 요청을 보내지 않는다. 사용법은 모델 호출 없이 `/lead --help`로 확인한다. Lead가 응답 중이면 요청은 후속 메시지로 대기한다. Worker 등 다른 역할에서는 `/lead`를 사용할 수 없다.
+
 프로젝트의 `.pi/extensions/workflow.ts`가 자동 로드된다. 프로젝트 신뢰·확장 실행 확인이 나타나면 저장소의 코드를 검토하고 허용한다. 이미 열어 둔 Pi에서는 `/reload` 후 `/workflow`를 실행한다. 확장 오류가 없어야 `workflow_prepare`, `workflow_cold_read` 도구를 사용할 수 있다. 위임할 때는 Herdr 안에서 시작한 Pi를 사용한다.
 
 `/workflow`는 현재 역할·경로, `actualModel`의 provider/model/effort, 역할 설정인 `expected`, 지침·스킬 경로인 `sources`, Herdr pane 여부와 `herdr_delegate` 가용 상태를 보여준다. 기본 역할은 `lead`다. 실제 모델 표시는 현재 세션 설정이며 서버의 모델 호출 성공을 증명하지는 않는다.
 
 프로젝트 기본값은 Astra/high다. CLI 인자나 복원한 세션의 선택이 다를 수 있으며 **확장은 현재 모델을 자동 변경하지 않는다. 현재 provider·model·effort가 역할 기준과 다르면 모델 요청을 차단한다.** `/workflow`에서 차이를 확인하고 `/model`, `/thinking` 또는 기존 `pi-lead` 실행 설정을 기준에 맞춘다. 역할 기준을 의도적으로 바꾸려면 `.workflow/roles.json`과 Pi 설정·실행 인자를 함께 변경한다. 지침 누락·역할 충돌도 오류로 보고한다.
 
-첫 메시지로 지침 로딩을 점검한다.
+작업 전에 지침 로딩만 점검하려면 다음처럼 요청한다.
 
 ~~~text
-.workflow/briefs/load-check.md를 읽고 지침 로딩을 점검해.
+/lead .workflow/briefs/load-check.md를 읽고 지침 로딩을 점검해.
 현재 역할과 실제로 읽은 Paperthin 지침을 구분해서 알려줘.
 코드 수정이나 작업 위임은 하지 마.
 ~~~
@@ -60,7 +68,7 @@ Node.js 22 이상을 사용하며 외부 npm 의존성이 없어 `npm install`�
 | `.workflow/roles/*.md` | 역할별 책임과 행동 범위 |
 | `.workflow/roles.json` | 런타임·provider·모델·effort |
 | `.workflow/briefs/*.md` | 개별 작업과 완료 조건 |
-| `.pi/extensions/workflow.ts` | Pi 역할 연결, `/workflow`, 위임 준비·독립 검토 도구 |
+| `.pi/extensions/workflow.ts` | Pi 역할 연결, `/workflow` 상태, `/lead` 요청, 위임 준비·독립 검토 도구 |
 | `vendor/paperthin/skills/` | 커밋을 고정한 Paperthin 네 스킬 원본 |
 | `.pi/skills`, `.claude/skills`, `.agents/skills` | 같은 스킬 원본을 가리키는 상대 symlink |
 | `scripts/agent.mjs` | 확장과 보조 CLI가 공유하는 실행 설정 생성기 |
@@ -83,54 +91,19 @@ Node.js 22 이상을 사용하며 외부 npm 의존성이 없어 `npm install`�
 
 ## 삭제 기능 위임 실습
 
-### 1. 기준 커밋과 worktree 준비
+### Lead에게 작업 요청
 
-초기 커밋이 없다면 파일을 검토하고 사용자가 먼저 기준 커밋을 만든다. 이미 커밋이 있으면 실제 HEAD와 변경 상태부터 확인한다.
-
-~~~bash
-git status --short
-git add AGENTS.md CLAUDE.md README.md RUNBOOK.md .gitignore .pi .claude .agents .workflow vendor scripts src test package.json
-git diff --cached --stat
-git commit -m "chore: add Pi Paperthin orchestration example"
-~~~
-
-다음은 브랜치와 경로가 없는 새 실습 기준이다. 이미 있으면 기존 상태를 확인하고 재사용하거나 새 이름을 선택한다.
-
-~~~bash
-mkdir -p ../worktrees
-git worktree add -b codex/todo-delete-sol ../worktrees/pi-paperthin-delete HEAD
-~~~
-
-### 2. Lead에게 작업 요청
-
-Herdr 안의 Lead Pi에 다음을 입력한다. 이 프롬프트는 실습 범위의 로컬 커밋과 통합을 허용한다. Worker 자체는 커밋하지 않고 Lead가 후보를 만든다.
+Herdr 안의 Lead Pi에서 `/workflow`로 상태를 확인한 뒤 다음을 입력한다.
 
 ~~~text
-.workflow/briefs/add-delete.md의 삭제 기능을 구현하자.
-Worker는 ../worktrees/pi-paperthin-delete worktree에서 작업하게 해.
-실제 절대경로와 기준 SHA를 먼저 확인해.
-
-workflow_prepare로 Worker 위임 인자를 준비하고,
-반환된 herdr_delegate 인자를 그대로 기존 herdr_delegate에 전달해.
-agentArgs나 prompt를 다시 작성하거나 생략하지 마.
-
-Worker 결과에서 diff와 npm test 근거를 확인해.
-해당 worktree에서 이번 실습 파일만 로컬 후보 커밋으로 만들어
-리뷰할 candidate SHA를 고정해. 인계 기록은 .agent-runs에 남겨.
-
-review-delete.md를 바탕으로 실제 base/candidate SHA와 테스트 근거를
-담은 새 브리프를 .agent-runs에 만들어.
-workflow_prepare의 reviewer 역할로 준비한 뒤 Reviewer에 위임해.
-원본 리뷰 브리프에는 SHA가 없으므로 그대로 검토시키지 마.
-수정이 필요하면 해당 범위 수정, 테스트, 재검토를 진행해.
-
-통과한 변경을 원래 checkout에 통합하고 npm test를 실행해.
-이번 실습에 필요한 로컬 커밋과 cherry-pick은 허용한다.
-push, 원격 PR 생성, worktree 삭제는 하지 마.
-최종 커밋, 검증 결과, 남은 제한을 알려줘.
+/lead .workflow/briefs/add-delete.md를 구현하고 리뷰·테스트까지 진행해줘
 ~~~
 
-### 3. 도구 연결 이해하기
+새 작업도 `/lead 할 일 CLI에 검색 기능을 추가하고 테스트해줘`처럼 자연어로 요청할 수 있다. 사용자가 내부 도구 이름을 외우거나 브리프·worktree를 미리 만들 필요는 없다. Lead가 공통·역할 지침에 따라 실제 Git 상태와 기준 SHA를 확인하고, 작업 브리프·담당 파일·별도 Worker worktree를 준비한다. 이미 초기화한 저장소에서 초기 커밋을 다시 만들지 않는다. HEAD가 없는 저장소라면 Lead가 상태를 설명하고 허용된 범위에서만 기준 커밋을 준비한다.
+
+구현 요청에는 Lead의 로컬 worktree 준비, 담당 변경 파일만의 후보 커밋, 리뷰와 사용자 변경을 보존하는 원래 checkout으로의 로컬 통합이 포함되며, 커밋 금지 등 명시한 제한은 우선한다. Lead는 후보 SHA와 검증 근거를 담은 리뷰 브리프로 Reviewer에 위임하고, 필요한 수정·재검토와 최종 검증 후 결과를 보고한다. 계획·읽기 요청은 구현이나 Worker 위임을 뜻하지 않으며, `/lead` 자체가 원격 push·PR 권한을 부여하지는 않는다. `/lead`는 현재 세션을 사용하며 새 Lead pane을 만들거나 모델을 바꾸지 않는다.
+
+### 선택: 도구 연결 이해하기
 
 `workflow_prepare`에 전달하는 예시:
 

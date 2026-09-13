@@ -53,9 +53,10 @@ function fakeApi(role = 'lead', execResult = { stdout: 'Artifact needs one clari
   const commands = new Map();
   const flags = new Map([['workflow-role', role]]);
   const messages = [];
+  const userMessages = [];
   const executions = [];
   return {
-    handlers, tools, commands, flags, messages, executions,
+    handlers, tools, commands, flags, messages, userMessages, executions,
     api: {
       on(name, handler) { handlers.set(name, handler); },
       registerFlag(name, options) { if (!flags.has(name)) flags.set(name, options.default); },
@@ -66,6 +67,7 @@ function fakeApi(role = 'lead', execResult = { stdout: 'Artifact needs one clari
       getAllTools() { return [{ name: 'herdr_delegate' }]; },
       getActiveTools() { return ['herdr_delegate']; },
       sendMessage(message, options) { messages.push({ message, options }); },
+      sendUserMessage(message, options) { userMessages.push({ message, options }); },
       async exec(command, args, options) {
         executions.push({ command, args, options });
         return execResult;
@@ -80,7 +82,8 @@ function context(directory, systemPrompt = 'Existing system prompt.') {
     hasUI: false,
     model: { provider: 'observed-provider', id: 'observed-model' },
     getSystemPrompt() { return systemPrompt; },
-    ui: { notify() {}, setStatus() {} },
+    isIdle() { return true; },
+    ui: { notify() {}, setStatus() {}, async editor() { return undefined; } },
   };
 }
 
@@ -113,6 +116,15 @@ test('Pi workflow extension works without model or Herdr calls', {
   });
   const factory = await jiti.import(extensionPath, { default: true });
 
+  async function leadSession(directory) {
+    const fake = fakeApi();
+    fake.api.getThinkingLevel = () => 'high';
+    const ctx = context(directory, '<pi-paperthin-role:lead>');
+    ctx.model = { provider: 'openai-codex', id: 'gpt-6-astra' };
+    await factory(fake.api);
+    return { fake, ctx, command: fake.commands.get('lead') };
+  }
+
   await t.test('installed Pi loader accepts the extension and registers its public surface', async () => {
     const { loadExtensions } = await import(pathToFileURL(path.join(sdk, 'dist/core/extensions/loader.js')).href);
     const result = await loadExtensions([extensionPath], ROOT);
@@ -121,6 +133,7 @@ test('Pi workflow extension works without model or Herdr calls', {
     const extension = result.extensions[0];
     assert.equal(extension.flags.get('workflow-role').default, 'lead');
     assert.ok(extension.commands.has('workflow'));
+    assert.ok(extension.commands.has('lead'));
     assert.ok(extension.tools.has('workflow_prepare'));
     assert.ok(extension.tools.has('workflow_cold_read'));
     assert.ok(extension.handlers.has('before_agent_start'));
@@ -139,16 +152,16 @@ test('Pi workflow extension works without model or Herdr calls', {
       // The matching marker must not hide an additional conflicting policy.
       { role: 'worker', prompt: '<pi-paperthin-role:worker>\n<pi-paperthin-role:lead>', action: 'handled' },
     ];
-    for (const scenario of cases) {
+    for (const scenario of cases.flatMap((entry) => ['interactive', 'extension'].map((source) => ({ ...entry, source })))) {
       const fake = fakeApi(scenario.role);
       fake.api.getThinkingLevel = () => scenario.role === 'worker' ? 'medium' : 'high';
       const ctx = context(directory, scenario.prompt);
       ctx.model = { provider: 'openai-codex', id: scenario.role === 'worker' ? 'gpt-5.6-sol' : 'gpt-6-astra' };
       await factory(fake.api);
       const result = await fake.handlers.get('input')({
-        source: 'interactive', text: 'Implement the requested change.', images: [],
+        source: scenario.source, text: 'Implement the requested change.', images: [],
       }, ctx);
-      assert.equal(result.action, scenario.action, `${scenario.role}: ${scenario.prompt}`);
+      assert.equal(result.action, scenario.action, `${scenario.source}: ${scenario.role}: ${scenario.prompt}`);
       const errors = fake.messages.filter((item) => item.message.customType === 'workflow-error');
       assert.equal(errors.length, scenario.action === 'handled' ? 1 : 0);
       if (errors.length > 0) {
@@ -165,7 +178,9 @@ test('Pi workflow extension works without model or Herdr calls', {
     for (const role of ['lead', 'worker']) {
       const expectedModel = role === 'lead' ? 'gpt-6-astra' : 'gpt-5.6-sol';
       const expectedEffort = role === 'lead' ? 'high' : 'medium';
-      for (const mismatch of ['provider', 'model', 'effort', 'missing-model']) {
+      const cases = ['provider', 'model', 'effort', 'missing-model']
+        .flatMap((mismatch) => ['interactive', 'extension'].map((source) => ({ mismatch, source })));
+      for (const { mismatch, source } of cases) {
         const fake = fakeApi(role);
         const ctx = context(directory, `<pi-paperthin-role:${role}>`);
         ctx.model = {
@@ -176,9 +191,9 @@ test('Pi workflow extension works without model or Herdr calls', {
         fake.api.getThinkingLevel = () => mismatch === 'effort' ? 'low' : expectedEffort;
         await factory(fake.api);
         const result = await fake.handlers.get('input')({
-          source: 'interactive', text: 'Implement the requested change.', images: [],
+          source, text: 'Implement the requested change.', images: [],
         }, ctx);
-        assert.equal(result.action, 'handled', `${role}: ${mismatch}`);
+        assert.equal(result.action, 'handled', `${source}: ${role}: ${mismatch}`);
         const errors = fake.messages.filter((item) => item.message.customType === 'workflow-error');
         assert.equal(errors.length, 1);
         assert.ok(errors[0].message.content.includes(`openai-codex/${expectedModel}`));
@@ -187,6 +202,114 @@ test('Pi workflow extension works without model or Herdr calls', {
         assert.equal(fake.executions.length, 0);
       }
     }
+  });
+
+  await t.test('lead sends the original request as a follow-up whether the session is idle or busy', async (st) => {
+    const { directory } = fixture(st);
+    const request = '  /literal-template Inspect $(touch NEVER_RUN) and `echo unsafe`.\nPreserve this second line.  ';
+    for (const idle of [true, false]) {
+      const { fake, ctx, command } = await leadSession(directory);
+      ctx.isIdle = () => idle;
+      ctx.ui.editor = async () => assert.fail('An inline request must not open the editor');
+      await command.handler(request, ctx);
+      assert.deepEqual(fake.userMessages, [{
+        message: request,
+        options: { deliverAs: 'followUp', expandPromptTemplates: false },
+      }]);
+      assert.equal(fake.messages.length, 0);
+      assert.equal(fake.executions.length, 0);
+    }
+    assert.equal(existsSync(path.join(directory, 'NEVER_RUN')), false);
+  });
+
+  await t.test('lead opens the multiline editor and sends only a nonblank submitted request', async (st) => {
+    const { directory } = fixture(st);
+    const submitted = '  Investigate this issue.\nKeep $(touch NEVER_RUN) and `echo unsafe` literal.\n';
+    for (const response of [submitted, undefined, '', ' \n\t ']) {
+      const { fake, ctx, command } = await leadSession(directory);
+      const editorTitles = [];
+      ctx.hasUI = true;
+      ctx.ui.editor = async (title) => { editorTitles.push(title); return response; };
+      await command.handler('', ctx);
+      assert.deepEqual(editorTitles, ['Lead에게 요청할 작업']);
+      assert.deepEqual(fake.userMessages, response === submitted ? [{
+        message: submitted,
+        options: { deliverAs: 'followUp', expandPromptTemplates: false },
+      }] : []);
+      assert.equal(fake.messages.length, 0);
+      assert.equal(fake.executions.length, 0);
+    }
+    assert.equal(existsSync(path.join(directory, 'NEVER_RUN')), false);
+  });
+
+  await t.test('lead help and an empty headless command show usage without submitting work', async (st) => {
+    const { directory } = fixture(st);
+    for (const args of ['', ' \n ', '--help', 'help', '-h']) {
+      const { fake, ctx, command } = await leadSession(directory);
+      ctx.hasUI = args.trim().length > 0;
+      ctx.ui.editor = async () => assert.fail('Help or an empty headless command must not open the editor');
+      await command.handler(args, ctx);
+      assert.equal(fake.messages.length, 1);
+      const [{ message, options }] = fake.messages;
+      assert.equal(message.customType, 'workflow-help');
+      assert.match(message.content, /\/lead/);
+      assert.equal(message.display, true);
+      assert.equal(options.triggerTurn, false);
+      assert.equal(fake.userMessages.length, 0);
+      assert.equal(fake.executions.length, 0);
+    }
+  });
+
+  await t.test('lead rejects worker sessions, conflicting policy, and provider/model/effort mismatches', async (st) => {
+    const { directory } = fixture(st);
+    for (const mismatch of ['worker', 'invalid-role', 'policy', 'provider', 'model', 'effort', 'missing-model']) {
+      const { fake, ctx, command } = await leadSession(directory);
+      if (mismatch === 'worker') {
+        fake.flags.set('workflow-role', 'worker');
+        ctx.getSystemPrompt = () => '<pi-paperthin-role:worker>';
+        ctx.model = { provider: 'openai-codex', id: 'gpt-5.6-sol' };
+        fake.api.getThinkingLevel = () => 'medium';
+      }
+      if (mismatch === 'invalid-role') fake.flags.set('workflow-role', 'reviewer');
+      if (mismatch === 'policy') ctx.getSystemPrompt = () => '<pi-paperthin-role:lead>\n<pi-paperthin-role:worker>';
+      if (mismatch === 'provider') ctx.model.provider = 'unexpected-provider';
+      if (mismatch === 'model') ctx.model.id = 'unexpected-model';
+      if (mismatch === 'effort') fake.api.getThinkingLevel = () => 'low';
+      if (mismatch === 'missing-model') ctx.model = undefined;
+      ctx.hasUI = true;
+      ctx.ui.editor = async () => assert.fail('Invalid routing must be rejected before opening the editor');
+      for (const args of ['Implement the requested change.', '']) {
+        await command.handler(args, ctx);
+        assert.equal(fake.userMessages.length, 0, mismatch);
+        const { message, options } = fake.messages.at(-1);
+        assert.equal(message.customType, 'workflow-error', mismatch);
+        assert.equal(message.display, true);
+        assert.equal(options.triggerTurn, false);
+      }
+      assert.equal(fake.messages.length, 2, mismatch);
+      assert.equal(fake.executions.length, 0);
+    }
+  });
+
+  await t.test('lead revalidates routing when the model changes while the editor is open', async (st) => {
+    const { directory } = fixture(st);
+    const { fake, ctx, command } = await leadSession(directory);
+    let finishEditing;
+    ctx.hasUI = true;
+    ctx.ui.editor = () => new Promise((resolve) => { finishEditing = resolve; });
+    const pending = command.handler('', ctx);
+    assert.equal(typeof finishEditing, 'function');
+    ctx.model = { provider: 'openai-codex', id: 'unexpected-fallback-model' };
+    finishEditing('Implement the requested change.');
+    await pending;
+    assert.equal(fake.userMessages.length, 0);
+    assert.equal(fake.messages.length, 1);
+    const [{ message, options }] = fake.messages;
+    assert.equal(message.customType, 'workflow-error');
+    assert.ok(message.content.includes('openai-codex/gpt-6-astra'));
+    assert.equal(message.display, true);
+    assert.equal(options.triggerTurn, false);
+    assert.equal(fake.executions.length, 0);
   });
 
   await t.test('worker policy and pinned skills load outside the source checkout without duplicate policy', async (st) => {
@@ -284,6 +407,7 @@ test('Pi workflow extension works without model or Herdr calls', {
     assert.equal(status.role, 'lead');
     assert.deepEqual(status.actualModel, { provider: 'observed-provider', model: 'observed-model', effort: 'medium' });
     assert.equal(status.expected.model, 'gpt-6-astra');
+    assert.match(status.next, /\/lead/);
     assert.equal(status.sources.skills.length, 4);
     assert.equal(sent.options.triggerTurn, false);
     assert.equal(fake.executions.length, 0);

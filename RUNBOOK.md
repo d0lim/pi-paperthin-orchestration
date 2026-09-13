@@ -14,7 +14,7 @@
 | Herdr | 여러 CLI 에이전트의 pane과 상태 관리 |
 | Herdr integration | Pi·Claude·Codex의 세션 상태 보고 |
 | 기존 `@andrewjacop/pi-herdr` | 에이전트 시작, 프롬프트 전송, 대기·결과 수집 |
-| 프로젝트 `workflow.ts` 확장 | 역할·지침·모델 설정 연결, 위임 인자 준비, 독립 검토 |
+| 프로젝트 `workflow.ts` 확장 | `/workflow` 상태 확인, `/lead` 작업 요청, 역할·지침 연결, 위임 인자 준비·독립 검토 |
 | Paperthin | 요구사항 해석, 추론 수준 추천, 결과물 검토·문서 정리 |
 | 프로젝트 운영 지침 | worktree 소유권, 테스트·리뷰·통합 완료 조건 |
 
@@ -46,7 +46,7 @@ Herdr 안의 Pi / Astra / high
 | Paperthin | 프로젝트에 네 스킬 원본·라이선스·소스 커밋 고정 |
 | 역할 설정 | `.workflow/roles.json`; 프로젝트 Pi 기본값 Astra/high |
 
-현재 버전은 실행 시 다시 확인한다. 프로젝트 파일과 로컬 검증 기록만 작성했으며 전역 셸 설정·인증·기존 플러그인·기존 Herdr pane은 변경하지 않았다. 초기 커밋, 실제 Git worktree 기반 삭제 기능 위임, 원격 저장소 생성은 별도 실습이다.
+현재 버전은 실행 시 다시 확인한다. 전역 셸 설정·인증·기존 플러그인·기존 Herdr pane은 변경하지 않았다. 저장소는 이미 초기 커밋과 원격 push를 마친 상태이므로 시작할 때 초기 커밋을 다시 만들지 않는다. 실제 Git worktree 기반 삭제 기능 위임은 별도 실습이다.
 
 ## 3. 설치와 버전 관리
 
@@ -125,6 +125,14 @@ Pi 입력창에서 `/workflow`를 실행한다. 모델 호출 없이 다음 상�
 - `sources`: 공통·역할 지침과 Paperthin 경로.
 - `herdr`: Herdr pane 안인지와 `herdr_delegate` 활성 여부.
 
+상태 확인 후 같은 Pi에서 작업을 요청한다.
+
+~~~text
+/lead .workflow/briefs/add-delete.md를 구현하고 리뷰·테스트까지 진행해줘
+~~~
+
+`/workflow`는 상태만 보여주고 `/lead <요청>`이 Lead에게 실제 작업을 보낸다. `/lead`만 입력하면 여러 줄 편집기가 열리며 취소 시 요청을 보내지 않는다. `/lead --help`는 모델 호출 없이 사용법을 보여준다. 응답 중인 Lead에게 보낸 요청은 후속 메시지로 대기한다. 다른 역할에서는 `/lead`를 사용할 수 없다. 현재 Lead 세션을 그대로 사용하며 새 Lead pane을 만들거나 모델·effort를 변경하지 않는다.
+
 기본 역할은 Lead다. `before_agent_start`가 공통·역할 지침을 추가하고 `resources_discover`가 Paperthin 네이티브 스킬 경로를 제공한다. 이미 주입된 역할 지침은 중복 추가하지 않는다.
 
 확장은 현재 모델을 자동 변경하지 않는다. **현재 provider·model·effort가 역할 기준과 다르면 모델 요청을 차단한다.** 지침 누락·역할 충돌도 오류로 보고한다. Pi가 사용할 수 없는 기본 모델 대신 다른 모델을 선택하더라도 그 상태로 작업을 계속하지 않는다. `/workflow`에서 차이를 확인하고 `/model`, thinking 설정을 기준에 맞춘다. 역할 기준을 의도적으로 바꾸려면 `.workflow/roles.json`과 Pi 설정·실행 인자를 함께 변경한다.
@@ -165,7 +173,7 @@ Pi 입력창에서 `/workflow`를 실행한다. 모델 호출 없이 다음 상�
 
 ## 7. 자동 위임과 결과 수집
 
-평소에는 mjs 명령을 직접 실행하지 않고 Pi에 작업을 요청한다. Lead는 다음 순서를 따른다.
+평소에는 `/lead <자연어 요청>`으로 작업을 요청한다. 사용자가 브리프·worktree를 미리 준비하거나 내부 도구를 지정할 필요는 없다. Lead가 공통·역할 지침에 따라 필요한 준비와 위임을 수행한다. 다음은 연결 구조를 이해하거나 문제를 진단할 때 참고하는 내부 순서다.
 
 1. 실제 worktree 절대경로, 기준 커밋, 파일 소유권, 테스트·완료 조건을 브리프에 정한다.
 2. `workflow_prepare`에 `role`, `cwd`, `brief`, 선택적 `name`을 전달한다.
@@ -180,7 +188,7 @@ Pi 입력창에서 `/workflow`를 실행한다. 모델 호출 없이 다음 상�
 
 pane의 idle 표시, 프로세스 정상 종료, 모델의 완료 선언은 품질 승인 근거가 아니다. 테스트 결과와 검토 범위가 있어야 한다. 리뷰는 고정한 SHA와 tracked·staged·untracked 상태를 함께 확인한다. 리뷰 도중 후보를 바꾸지 않으며 수정 후에는 다시 검증한다.
 
-첫 실습의 기준 커밋·worktree 명령과 복사 가능한 작업 요청은 [README.md](README.md)에 있다. Worker 브리프는 기본적으로 커밋을 허용하지 않는다. README의 실습 요청은 Lead에게 해당 기능의 로컬 커밋과 cherry-pick을 허용하며 원격 push·PR 생성은 포함하지 않는다.
+첫 실습의 복사 가능한 `/lead` 요청은 [README.md](README.md)에 있다. Lead는 기존 HEAD와 변경 상태를 먼저 확인한다. HEAD가 없으면 상태를 보고하고 허용된 범위에서만 기준 커밋을 준비한다. 구현 요청에는 Lead의 로컬 worktree 준비, 담당 변경 파일만의 후보 커밋, 리뷰와 사용자 변경을 보존하는 원래 checkout으로의 로컬 통합이 포함되며, 커밋 금지 등 명시한 제한은 우선한다. Worker 브리프는 기본적으로 커밋을 허용하지 않는다. 계획·읽기 요청은 구현이나 Worker 위임을 뜻하지 않으며, `/lead` 자체가 원격 push·PR 권한을 부여하지는 않는다. worktree 삭제도 별도 권한을 따른다.
 
 ## 8. Paperthin 적용
 
@@ -224,7 +232,7 @@ Next action:
 
 | 증상 | 확인·조치 |
 | --- | --- |
-| `/workflow`가 없음 | 프로젝트 cwd, 확장 파일, 신뢰 허용, 확장 로드 오류 확인 후 `/reload` |
+| `/workflow` 또는 `/lead`가 없음 | 프로젝트 cwd, 확장 파일, 신뢰 허용, 확장 로드 오류 확인 후 `/reload` |
 | `workflow-error`로 요청 중단 | actual/expected model·provider·effort와 역할 지침을 맞추고 재요청 |
 | `herdr_delegate`가 없음 | 기존 pi-herdr 설치·활성 상태 확인 후 Lead Pi 재시작 또는 `/reload` |
 | Herdr pane 밖 | Herdr를 터미널에서 시작하고 그 안의 pane에서 Lead Pi 실행 |
