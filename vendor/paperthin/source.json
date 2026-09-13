@@ -1,0 +1,18 @@
+{
+  "repository": "https://github.com/LilMGenius/paperthin",
+  "commit": "6f706e30b5ec55e87598bf3b59164c9d9d96222f",
+  "skills": [
+    "readchk",
+    "modelchk",
+    "shower",
+    "re0"
+  ],
+  "sha256": {
+    "LICENSE": "a3f8d514b2bdd3e16ed555c53add0b3381d3890fe2af312859c0b043867c1fb3",
+    "NOTICE": "9febf9b3029bd3ff14c5bcd3b7f1375f01c8e9edfd464cb75f884360c5bf6f3f",
+    "skills/modelchk/SKILL.md": "e8c04bfd320361a039a65bed21d098df6122b68ae83006b4dff53a6b014a7769",
+    "skills/re0/SKILL.md": "8f418bc55bbbbd5fea0f09aa72ee9ae0ea672df3f36606c3856abed265e9560a",
+    "skills/readchk/SKILL.md": "ad031663c912f08c7ac90ea011a4bd208ab4940577751c8433e7f25538c3aa63",
+    "skills/shower/SKILL.md": "8e81a802dcd3a74390b0bf9703d8e1da9f31c46d06a779abbe47635022792dc1"
+  }
+}

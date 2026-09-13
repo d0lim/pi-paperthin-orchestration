@@ -1,0 +1,18 @@
+{
+  "name": "pi-paperthin-orchestration-example",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "A small task CLI for practicing Pi, Herdr, and Paperthin workflows.",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "test": "node --test test/*.test.js",
+    "tasks": "node src/cli.js",
+    "lead": "node scripts/agent.mjs lead",
+    "worker": "node scripts/agent.mjs worker",
+    "reviewer": "node scripts/agent.mjs reviewer",
+    "inspect:worker": "node scripts/agent.mjs worker --brief .workflow/briefs/load-check.md --dry-run"
+  }
+}

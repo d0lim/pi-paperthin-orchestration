@@ -1,0 +1,7 @@
+node_modules/
+.data/
+.agent-runs/
+.DS_Store
+.env
+.env.*
+**/auth.json
