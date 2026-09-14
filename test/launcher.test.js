@@ -185,7 +185,34 @@ test('cold read excludes project policy, role, skill catalog and tools', t => {
   assert.ok(!launch.args.includes('--workflow-role'));
   assert.ok(!launch.args.includes('--skill'));
   assert.ok(launch.prompt.includes(readFileSync(brief, 'utf8')));
+  const original = readFileSync(brief);
+  assert.equal(launch.sources.artifactSha256, createHash('sha256').update(original).digest('hex'));
+  writeFileSync(brief, 'A changed artifact after preparing the read.');
+  assert.ok(launch.prompt.includes(original.toString('utf8')), 'the digest identifies the same snapshot sent to the reader');
+  assert.ok(!launch.prompt.includes(readFileSync(brief, 'utf8')));
   assert.throws(() => buildLaunch({ role: 'cold-read', cwd: dir, artifact: brief, brief }), /브리프/);
+});
+
+test('every runtime receives complete role-specific Paperthin bodies without unrelated skill bodies', t => {
+  const { dir, brief } = fixture(t);
+  const expected = {
+    lead: ['readchk', 'modelchk', 'shower', 're0'],
+    worker: ['readchk', 're0'],
+    reviewer: ['readchk'],
+    escalation: ['readchk'],
+    'codex-worker': ['readchk', 're0'],
+  };
+  for (const [role, names] of Object.entries(expected)) {
+    const launch = buildLaunch({ role, cwd: dir, brief });
+    const delivered = launch.runtime === 'codex'
+      ? JSON.parse(launch.args.find(arg => arg.startsWith('developer_instructions=')).slice('developer_instructions='.length))
+      : valueAfter(launch.args, '--append-system-prompt');
+    assert.deepEqual(launch.sources.embeddedSkills.map(p => path.basename(path.dirname(p))), names, role);
+    for (const skillPath of launch.sources.skills) {
+      const name = path.basename(path.dirname(skillPath));
+      assert.equal(delivered.includes(readFileSync(skillPath, 'utf8')), names.includes(name), `${role}/${name}`);
+    }
+  }
 });
 
 test('review policy supports plan artifact hashes separately from code commit identities', t => {
@@ -194,9 +221,10 @@ test('review policy supports plan artifact hashes separately from code commit id
   assert.ok(policy.includes('계획 파일의 실제 SHA-256'));
   assert.ok(policy.includes('계획 검토에는 코드 base/candidate SHA를 요구하지 않는다'));
   assert.ok(policy.includes('실제 base SHA와 candidate SHA'));
-  const leadPolicy = buildPolicy('lead', { cwd: dir }).policy;
-  assert.ok(leadPolicy.indexOf('구현 전에 독립 Reviewer') < leadPolicy.indexOf('Worker 브리프'));
-  assert.ok(leadPolicy.includes('리뷰를 통과한 변경을 Lead가'));
+  const leadPolicy = buildPolicy('lead', { cwd: dir });
+  const steps = readFileSync(leadPolicy.sources.role, 'utf8');
+  assert.ok(steps.indexOf('구현 전에 독립 Reviewer') < steps.indexOf('Worker 브리프'));
+  assert.ok(leadPolicy.policy.includes('리뷰를 통과한 변경을 Lead가'));
 });
 
 test('invalid role, missing brief and conflicting invocation modes fail before starting a runtime', t => {

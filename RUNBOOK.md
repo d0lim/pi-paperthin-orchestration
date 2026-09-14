@@ -8,7 +8,7 @@
 
 사용자는 작업할 프로젝트에서 `pi`를 실행하고 `/lead <요청>`으로 역할 분담을 시작한다. 패키지 설치와 대상 프로젝트의 개발을 구분한다. 패키지 저장소의 예제 앱을 먼저 구현하거나 프로젝트마다 역할 파일을 복사할 필요는 없다.
 
-Lead는 계획과 조율, Worker는 할당 단계 구현, Reviewer는 계획·코드 검토를 맡는다. Paperthin은 각 단계의 해석과 검토 방식을 보완하며 Compound Engineering은 사용하지 않는다. Herdr pane·진행·결과 수집은 이미 설치한 `pi-herdr`를 재사용한다.
+Lead는 계획과 조율, Worker는 할당 단계 구현, Reviewer는 계획·코드 검토를 맡는다. Paperthin은 요청 해석, 위임 전 작업 규모 판단, 브리프·인계의 독립 검토와 문서 정리에 적용한다. Compound Engineering은 사용하지 않는다. Herdr pane·진행·결과 수집은 이미 설치한 `pi-herdr`를 재사용한다.
 
 순서는 Lead가 지침에 따라 진행한다. 현재 확장은 역할·모델·지침 전달 도구이며, 모든 승인과 단계 전이를 코드로 강제하는 워크플로우 엔진은 아니다. 이 차이를 실제 작업의 검증 기준에 반영한다.
 
@@ -83,7 +83,7 @@ Pi의 `/login`에서 `ChatGPT Plus/Pro (Codex)`를 선택한다. 기존 로그�
 
 일반 Pi에서는 정책이 비활성 상태다. `/lead` 또는 명시적 `--workflow-role`이 역할 정책을 활성화한다. `/lead`는 인증된 모델 설정에서 정확한 Lead 모델과 effort를 선택하며 실패 시 요청을 중단한다.
 
-`/workflow`는 활성 여부, 역할, 실제 모델·effort, 기대 설정, 정책·스킬 경로, Herdr 연결을 보여준다. 이 상태 조회는 모델 호출을 하지 않는다. `/workflow off`는 정책과 역할 검사를 비활성화한다.
+`/workflow`는 활성 여부, 역할, 실제 모델·effort, 기대 설정, 프로젝트 설정 경로와 Herdr 연결 상태를 보여준다. 이 상태 조회는 모델 호출을 하지 않는다. `/workflow off`는 정책과 역할 검사를 비활성화한다.
 
 프로젝트의 신뢰 확인과 로컬 `AGENTS.md` 등 지침을 존중한다. 작업 디렉터리는 대상 프로젝트이며 패키지 설치 디렉터리와 다르다. 부모 대화가 Worker에게 자동 복사된다고 가정하지 않는다.
 
@@ -118,13 +118,15 @@ Pi의 `/login`에서 `ChatGPT Plus/Pro (Codex)`를 선택한다. 기존 로그�
 
 ## 6. 단계별 운영
 
-1. Lead가 대상 저장소의 지침·Git 상태를 읽고 요구사항, 제외 범위, 완료 조건을 정의한다.
-2. Lead가 전체 계획을 작성하고 Reviewer의 계획 검토를 받는다.
-3. Lead가 한 단계의 브리프에 실제 worktree·기준 커밋·담당 파일·테스트를 명시한다.
-4. Worker가 해당 범위만 구현하고 실제 테스트 결과와 변경 파일을 반환한다.
-5. Lead가 후보를 고정하고 Reviewer가 실제 base/candidate SHA와 tracked·staged·untracked 상태를 확인한다.
+1. Lead가 `readchk`로 요청을 해석해 `understood as: ...`를 기록하고, 대상 저장소의 지침·Git 상태를 읽어 요구사항·제외 범위·완료 조건을 정의한다.
+2. Lead가 첫 위임 전 `modelchk` 추천을 기록한다. 전체 계획은 필요한 `re0` 정리를 마친 뒤 파일 해시를 고정해 Reviewer의 검토를 받는다.
+3. Lead가 한 단계의 브리프에 실제 worktree·기준 커밋·담당 파일·테스트를 명시한다. 첫 실질 Worker 브리프는 `shower` 독립 해석과 의도를 비교해 보완한 뒤 전달한다.
+4. Worker가 `readchk`로 브리프를 해석하고 해당 범위를 구현해 실제 테스트 결과와 변경 파일을 반환한다. 문서를 반복 수정하거나 연관 문서를 맞출 때는 `re0`를 적용한다.
+5. Lead가 최종 사용자용 문서·인계 산출물의 `shower` 검토와 수정을 마친 뒤 후보를 고정한다. Reviewer는 실제 base/candidate SHA와 tracked·staged·untracked 상태를 확인해 검토한다.
 6. 필요한 수정·테스트·재검토 후 Lead가 허용된 범위의 로컬 커밋·통합을 진행한다.
-7. 남은 단계를 반복하고 완료 내용·검증·제약을 기록한다.
+7. 남은 단계를 반복하고 완료 내용·검증·제약과 Paperthin 적용 근거를 기록한다.
+
+산출물은 필요한 `re0` 정리 → 해당하는 `shower` 검토·수정 → 계획 또는 후보 해시 고정 → Reviewer 검토 순서로 준비한다. 해시를 고정하거나 승인받은 뒤 내용을 수정하면 새 해시로 영향받는 리뷰를 다시 받는다. 브리프 정정이 승인된 계획의 범위를 바꾸는 경우에는 계획 리뷰도 갱신한다.
 
 동시에 코드를 쓰는 작업자는 별도 worktree를 사용한다. Worker는 다른 작업자의 변경을 되돌리거나 Lead 브랜치에 직접 통합하지 않는다. Reviewer는 plan 모드에서 텍스트로 결과를 반환하며 Lead가 기록한다.
 
@@ -132,20 +134,22 @@ Pi의 `/login`에서 `ChatGPT Plus/Pro (Codex)`를 선택한다. 기존 로그�
 
 Lead는 `workflow_prepare`가 반환한 JSON을 기존 `herdr_delegate`로 전달한다. `agentArgs`, `cwd`, `prompt`, `onBlocked`를 보존한다. 이 연결에 확장 간 비공개 도구 호출이나 중복 Herdr 제어를 추가하지 않는다. timeout이면 기존 pane을 확인하고 Worker를 중복 생성하지 않는다.
 
-## 7. Paperthin
+## 7. Paperthin 적용 기준
 
-| 스킬 | 사용 조건 |
+활성 역할의 시스템 정책에는 필요한 SKILL.md 원문 전체가 포함된다. Lead는 네 스킬 모두, Worker·Codex Worker는 `readchk`와 `re0`, Reviewer·Escalation은 `readchk`를 받는다. 나머지 스킬은 전달된 경로로 읽을 수 있다. 원본과 라이선스는 [vendor/paperthin/](vendor/paperthin/), 소스 커밋·체크섬은 [source.json](vendor/paperthin/source.json)에 있다.
+
+| 스킬 | 적용·기록 기준 |
 | --- | --- |
-| readchk | 복합 요청이나 모호한 범위를 작업 전에 해석 |
-| modelchk | 모델·추론 비용을 판단할 때 추천 |
-| shower | 이전 대화 없이 결과물을 이해하는지 독립 검토 |
-| re0 | 누적된 문서 중복과 오래된 설명 정리 |
+| [readchk](vendor/paperthin/skills/readchk/SKILL.md) | 각 역할이 실질 작업 전에 문맥과 대조해 해석한다. 기존 작업 기록·응답에 `understood as: ...` 한 줄을 남기고, 문맥으로 해결된 해석은 재확인 질문 없이 진행한다. |
+| [modelchk](vendor/paperthin/skills/modelchk/SKILL.md) | Lead가 첫 위임 전, 범위·위험·실패 양상이 달라질 때 평가한다. 중립 tier·effort 추천과 실제 모델·effort 설정을 구분한다. 자동 전환하지 않는다. |
+| [shower](vendor/paperthin/skills/shower/SKILL.md) | Lead가 첫 실질 Worker 브리프와 최종 사용자용 문서·인계 산출물을 독립 검토한다. 동일 내용의 검토는 해시로 재사용하고 의미 변경 때 재검토한다. 매 브리프를 무조건 호출하지 않는다. |
+| [re0](vendor/paperthin/skills/re0/SKILL.md) | 문서 작성자가 반복 수정·연관 문서 동기화 때 대상과 관련 문서를 끝까지 읽고 기존 섹션을 정리한다. Reviewer는 문제를 보고하며 파일을 수정하지 않는다. |
 
-원본과 라이선스는 `vendor/paperthin/`, 소스 커밋·체크섬은 `source.json`에 둔다. 실제 SKILL.md를 읽은 것과 목록에서 설명만 본 것을 구분한다. 모든 작업마다 네 스킬을 의무 실행하지 않는다.
+`modelchk` 기록은 원본의 여섯 필드를 유지한다. `recommended_tier`는 `fast|standard|frontier`, `recommended_effort`는 `glance|measured|thorough|exhaustive` 중 하나다. `rationale`에 두 추천의 이유, `move_up_if`·`move_down_if`에 각 축을 조정할 조건, `proof_surface`에 설정과 무관하게 필요한 검증을 적는다. 기존 역할 설정과 차이가 있으면 기록하고 사용자가 지정한 모델·effort를 유지한다.
 
-shower는 원래 의도를 알고 하는 코드 리뷰와 구분한다. Lead가 스킬 지침을 읽고 `workflow_cold_read`에 결과물 경로만 전달한다. 최대 120초의 새 Pi 호출은 결과물 내용만 받고 도구·확장·자동 지침·스킬·세션 저장을 제외한다. 원래 세션이 독립 해석을 원래 의도와 비교한다.
+`shower`에서 Lead는 산출물의 목적과 독자를 한 줄로 따로 기록하고, `workflow_cold_read`에 파일 경로를 전달한다. 도구는 실제 파일 내용만 독립 Pi 호출에 보내며 부모 의도·대화와 도구·확장·자동 지침·스킬·세션 저장을 제외한다. 최대 120초의 호출이 반환한 `artifactSha256`와 독립 해석을 기록하고, Lead가 원래 의도와 비교해 불일치와 수정안을 정리한다. 실패·중단·불완전 응답을 독립 검토 통과로 기록하지 않는다.
 
-`hate`, `re0-memo`는 필요할 때 검토할 후속 후보다. `sip`, `re0-loop`, `re0-work` 등 다른 전체 루프는 기본 구성에 포함하지 않는다. [Paperthin](https://github.com/LilMGenius/paperthin)
+Paperthin 기록은 기존 작업 기록·응답에 적용 내용, 근거, 미적용·실패 이유를 함께 남긴다. `re0`는 읽고 수정한 문서와 제거한 중복·오래된 설명을, `shower`는 실제 독립 응답과 읽은 내용의 해시를 근거로 삼는다. 별도 로그 시스템을 만들거나 본문 전달만으로 적용 완료를 선언하지 않는다. 네 스킬의 적용 순서는 역할 지침이며 코드가 강제하는 단계 전이는 아니다. 추가 스킬이나 Paperthin의 다른 전체 루프는 기본 구성에 포함하지 않는다. [Paperthin](https://github.com/LilMGenius/paperthin)
 
 ## 8. 문제 해결과 검증
 
@@ -159,7 +163,7 @@ shower는 원래 의도를 알고 하는 코드 리뷰와 구분한다. Lead가 
 | 새 pane이 곧 종료됨 | pane의 PATH, 런타임, 인증·모델 오류 확인 |
 | Reviewer가 파일을 수정하려 함 | plan 모드와 역할 지침이 생성 인자에 포함됐는지 확인 |
 | 위임 timeout | 기존 pane의 상태·출력을 확인하고 중복 생성하지 않음 |
-| 스킬 이름만 알고 있음 | 전달된 실제 SKILL.md를 읽고 적용 근거를 보고하도록 요청 |
+| 스킬 사용 여부를 알 수 없음 | 역할별 본문 전달과 실제 적용을 구분하고, 작업 기록의 해석·추천·독립 응답/해시·문서 변경 근거 확인 |
 
 설치·패키지 로드·모의 도구 테스트와 실제 Herdr pane 생성·결과 회수·프로젝트 구현 검증은 구분한다. 현재 패키지의 변경에 맞는 검증 결과를 기록하며 이전 예제의 테스트 통과를 새 패키지 E2E 통과로 재사용하지 않는다.
 

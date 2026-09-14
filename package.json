@@ -1,6 +1,6 @@
 {
   "name": "pi-paperthin-orchestration",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "private": true,
   "type": "module",
   "description": "Installable Pi orchestration with project-aware role instructions, Herdr delegation, and Paperthin skills.",

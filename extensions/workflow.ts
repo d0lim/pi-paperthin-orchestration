@@ -196,7 +196,8 @@ export default function workflow(pi: ExtensionAPI) {
       const launch = buildLaunch({ role: 'cold-read', cwd: ctx.cwd, configCwd: configCwd(ctx), artifact: path.resolve(ctx.cwd, params.artifact) });
       const result = await pi.exec(launch.runtime, [...launch.args, '-p', '--', launch.prompt], { cwd: launch.cwd, timeout: 120000, signal });
       if (result.killed || result.code !== 0) throw new Error(`cold-read ${result.killed ? '중단 또는 시간 초과' : `실패 (exit ${result.code})`}. 자동 재시도하지 않았습니다.\n${result.stderr || result.stdout}`);
-      return { content: [{ type: 'text', text: result.stdout }], details: { sources: launch.sources, exitCode: result.code } };
+      const evidence = { artifact: launch.sources.artifact, artifactSha256: launch.sources.artifactSha256, interpretation: result.stdout };
+      return { content: [{ type: 'text', text: JSON.stringify(evidence, null, 2) }], details: { sources: launch.sources, exitCode: result.code } };
     },
   });
 }

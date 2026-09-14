@@ -316,7 +316,11 @@ test('installable extension contract without model or Herdr calls', {
     const controller = new AbortController();
     const run = () => h.tools.get('workflow_cold_read').execute('cold', { artifact: brief }, controller.signal, undefined, h.ctx);
     const result = await run();
-    assert.equal(result.content[0].text, 'Independent reading.');
+    const evidence = JSON.parse(result.content[0].text);
+    assert.equal(evidence.interpretation, 'Independent reading.');
+    assert.equal(evidence.artifact, result.details.sources.artifact);
+    assert.match(evidence.artifactSha256, /^[a-f0-9]{64}$/);
+    assert.equal(evidence.artifactSha256, buildLaunch({ role: 'cold-read', cwd, artifact: brief }).sources.artifactSha256);
     const execution = h.executions[0];
     assert.equal(execution.options.timeout, 120000);
     assert.equal(execution.options.signal, controller.signal);

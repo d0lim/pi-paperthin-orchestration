@@ -44,12 +44,14 @@ flowchart TD
 | 적용 범위 | 전역 파일·wrapper 설치 | Pi 패키지 설치 후 임의 프로젝트에서 활성화 |
 | 시작 | pi-orchestrator와 작업 프롬프트 | 일반 Pi에서 `/lead <요청>` |
 | Herdr 제어 | 자체 agent 도구 | 기존 pi-herdr 재사용 |
-| 스킬 | 킷 역할 지침과 선택 스킬 | Paperthin readchk·modelchk·shower·re0 |
+| 스킬 | 킷 역할 지침과 선택 스킬 | 역할별 Paperthin 본문 주입과 단계별 적용·증거 기록 |
 | 프로젝트 설정 | 킷의 생성 설정 | 대상 프로젝트 `.pi/paperthin.json` |
 
-현재 기본 흐름은 Lead 계획 → Reviewer 계획 검토 → Worker의 단계 구현 → Reviewer 코드 검토 → Lead의 승인 범위 커밋·통합이다. 별도 Planner는 현재 기본 역할로 구현했다고 주장하지 않는다.
+현재 기본 흐름은 Lead의 `readchk`·`modelchk` → 전체 계획 정리·해시 고정·계획 리뷰 → 첫 실질 Worker 브리프의 `shower` 검토·수정 → Worker 구현 → 최종 문서·인계의 `shower` 검토·수정 → 후보 SHA 고정·코드 리뷰 → Lead의 승인 범위 커밋·통합이다. 문서 작성자는 반복 수정·연관 문서 동기화 때 `re0`를 적용하고 필요한 `shower`와 수정을 마친 뒤 검토 대상을 고정한다. 별도 Planner 없이 Lead가 계획과 조율을 담당한다.
 
-이 패키지도 반복 전체를 강제하는 상태 머신은 아니다. `/lead`가 정확한 모델과 역할 정책을 활성화하고, `workflow_prepare`가 실행 인자·브리프를 준비하면 Lead가 기존 `herdr_delegate`로 실행한다. 모델이 진행 순서를 판단한다.
+Lead의 시스템 정책에는 Paperthin 네 스킬 원문을 모두 포함한다. Worker·Codex Worker는 `readchk`·`re0`, Reviewer·Escalation은 `readchk` 본문을 받으며 나머지는 경로로 이용할 수 있다. `modelchk`의 중립 추천은 실제 모델 설정과 분리한다. `shower`는 내용을 독립 세션에 보내고 실제 읽은 내용의 `artifactSha256`와 해석을 반환한다. 동일 내용의 검토를 재사용하고 의미 변경 때 재검토하며, 모든 브리프를 무조건 호출하지 않는다. 상세 시점과 기록 기준은 [Runbook](../RUNBOOK.md#7-paperthin-적용-기준)을 따른다.
+
+이 패키지도 반복 전체를 강제하는 상태 머신은 아니다. `/lead`가 정확한 모델과 역할 정책을 활성화하고, `workflow_prepare`가 실행 인자·브리프를 준비하면 Lead가 기존 `herdr_delegate`로 실행한다. 모델이 진행 순서를 판단한다. Paperthin 본문 전달도 실행 증명은 아니므로 기존 작업 기록에 적용 내용과 증거, 미적용·실패 이유를 남긴다.
 
 공통 지침은 현재 후보 SHA와 테스트 근거 확인, 작업자별 worktree, 다른 변경 보존, 리뷰 도중 후보 고정, 불필요한 모델·API fallback 금지를 요구한다. 이 규칙은 에이전트의 행동 지침이며 파일 권한이나 승인 이력을 검증하는 전이 엔진과 동일하지 않다.
 
