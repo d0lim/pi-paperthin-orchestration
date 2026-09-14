@@ -1,0 +1,254 @@
+[
+  {
+    "name": "re0",
+    "category": "depth",
+    "invocation": "model",
+    "kind": "edit",
+    "when": "An existing artifact has stale content, accumulated patches, or nearby documents that must stay aligned.",
+    "roles": ["lead", "worker", "codex-worker", "claude-worker"],
+    "note": "Read the whole artifact, preserve useful detail, and change nothing when no improvement is warranted."
+  },
+  {
+    "name": "readchk",
+    "category": "depth",
+    "invocation": "model",
+    "kind": "check",
+    "when": "A request or delegated brief is substantial, bundled, ambiguous, or costly to misunderstand.",
+    "roles": ["lead", "worker", "reviewer", "escalation", "codex-worker", "claude-worker"],
+    "note": "Resolve meaning from available context silently; ask only about a surviving fork. Record one understood-as line for substantial work."
+  },
+  {
+    "name": "aim",
+    "category": "depth",
+    "invocation": "model",
+    "kind": "check",
+    "when": "The user hands over material without a sufficiently formed request.",
+    "roles": ["lead"],
+    "note": "Read the material and propose the likely intent for confirmation. Do not replace an already clear request with a new confirmation step."
+  },
+  {
+    "name": "modelchk",
+    "category": "depth",
+    "invocation": "model",
+    "kind": "check",
+    "when": "Before a substantial work unit or when risk, ambiguity, verification cost, or failed attempts change its required capability or effort.",
+    "roles": ["lead", "worker", "reviewer", "escalation", "codex-worker", "claude-worker"],
+    "note": "Recommend a neutral tier and effort with rationale, escalation/de-escalation triggers, and proof surface. Only the workflow executor selects a configured concrete model and actual effort level."
+  },
+  {
+    "name": "hate",
+    "category": "depth",
+    "invocation": "user",
+    "kind": "check",
+    "when": "The user explicitly requests this adversarial attack on a plan, design, or argument.",
+    "roles": ["lead", "reviewer", "escalation"],
+    "note": "Return the single load-bearing objection and its cheapest falsification, not an automatic demolition pass or a checklist."
+  },
+  {
+    "name": "macrothink",
+    "category": "depth",
+    "invocation": "user",
+    "kind": "check",
+    "when": "The user explicitly requests independent fresh reads to challenge the current direction's framing.",
+    "roles": ["lead"],
+    "note": "Lead owns 2-5 context-free read-only runs, default 3, through the bounded job queue. Report divergence first; same-model agreement is not proof."
+  },
+  {
+    "name": "feynman",
+    "category": "depth",
+    "invocation": "user",
+    "kind": "check",
+    "when": "The user explicitly asks to test their understanding of a just-made decision.",
+    "roles": ["lead"],
+    "note": "Use a fresh critic and ask the user one gap at a time. This is an interactive learning exercise, not an automatic implementation gate."
+  },
+  {
+    "name": "autobahn",
+    "category": "depth",
+    "invocation": "model",
+    "kind": "loop",
+    "when": "Actual risk-adjacent scope needs an explicit safe alternative before execution.",
+    "roles": ["lead"],
+    "note": "Use only safe scope in a context-clean job, with one independent re-sweep. Preserve actual safety constraints and existing authorization; resolve scope-changing gray areas before execution. Never use isolation to evade safeguards or run this on every ordinary task."
+  },
+  {
+    "name": "reorder",
+    "category": "depth",
+    "invocation": "user",
+    "kind": "edit",
+    "when": "The user explicitly requests an intentional order for a listing, table, catalog, sections, or enum.",
+    "roles": ["lead", "worker", "codex-worker", "claude-worker"],
+    "note": "Move existing items only under one stated principle; do not reword, add, or remove them. Keep mirrored listings aligned."
+  },
+  {
+    "name": "detool",
+    "category": "depth",
+    "invocation": "model",
+    "kind": "edit",
+    "when": "An artifact promises portability or cross-agent reuse but contains incidental stack-specific mechanisms.",
+    "roles": ["lead", "worker", "codex-worker", "claude-worker"],
+    "note": "Keep runbooks, exact commands, provenance, measured limits, and claims about a named tool concrete."
+  },
+  {
+    "name": "dedash",
+    "category": "depth",
+    "invocation": "user",
+    "kind": "edit",
+    "when": "The user explicitly requests removing em-dash constructions in a named prose scope.",
+    "roles": ["lead", "worker", "codex-worker", "claude-worker"],
+    "note": "Judge each occurrence in context; preserve ranges, code, identifiers, quotes, and the user's scope."
+  },
+  {
+    "name": "debloat",
+    "category": "depth",
+    "invocation": "user",
+    "kind": "edit",
+    "when": "The user explicitly requests compressing correct but verbose prose while preserving its meaning.",
+    "roles": ["lead", "worker", "codex-worker", "claude-worker"],
+    "note": "Preserve every load-bearing claim and useful teaching detail. Route stale content to re0 and cross-file duplication to ssotize."
+  },
+  {
+    "name": "shower",
+    "category": "depth",
+    "invocation": "model",
+    "kind": "check",
+    "when": "An important artifact or handoff must make sense without the author's accumulated session context.",
+    "roles": ["lead", "worker", "reviewer", "escalation", "codex-worker", "claude-worker"],
+    "note": "A real fresh context reads only the artifact contents, never the author's intent or neighboring project files. Child roles request the cold-read through Lead instead of spawning their own orchestration."
+  },
+  {
+    "name": "factchk",
+    "category": "depth",
+    "invocation": "model",
+    "kind": "check",
+    "when": "A factual claim about the outside world, a product, a source, a number, or novelty lacks checked evidence.",
+    "roles": ["lead", "worker", "reviewer", "escalation", "codex-worker", "claude-worker"],
+    "note": "Use reachable external primary sources and cite them; report unavailable evidence instead of guessing. Review roles return findings, while the authorized author fixes mechanically clear errors."
+  },
+  {
+    "name": "mandela",
+    "category": "depth",
+    "invocation": "model",
+    "kind": "check",
+    "when": "A test, eval, benchmark, metric, or experiment may validate its own assumptions without independent ground truth.",
+    "roles": ["lead", "worker", "reviewer", "escalation", "codex-worker", "claude-worker"],
+    "note": "Audit read-only for the upstream eight leakage patterns. High-stakes designs may request one additional fresh auditor through Lead."
+  },
+  {
+    "name": "sip",
+    "category": "depth",
+    "invocation": "model",
+    "kind": "check",
+    "when": "A changed artifact is ready for completion, review, or handoff.",
+    "roles": ["lead", "worker", "codex-worker", "claude-worker"],
+    "note": "Select applicable model-invoked checks: shower, factchk or mandela, ssotize audit, conditional detool, and re0. Reuse evidence for an unchanged artifact revision, record skips, and never commit or start a second top-level loop."
+  },
+  {
+    "name": "re0-git",
+    "category": "depth",
+    "invocation": "user",
+    "kind": "maintenance",
+    "when": "The user explicitly asks to clean up the message of an existing commit.",
+    "roles": ["lead"],
+    "note": "Changes history, not the tree, and requires signing support. Never create a commit because this skill is available; rewriting pushed/shared history needs explicit authorization."
+  },
+  {
+    "name": "re0-release",
+    "category": "depth",
+    "invocation": "user",
+    "kind": "maintenance",
+    "when": "The user explicitly invokes the Paperthin release procedure for a project that adopts its required release conventions.",
+    "roles": ["lead"],
+    "note": "The upstream procedure is tied to Paperthin catalogs, signed tags, and release CI. Inspect applicability and existing authorization; do not impose its checklist on an unrelated target project or infer publishing permission from skill installation."
+  },
+  {
+    "name": "re0-merge",
+    "category": "depth",
+    "invocation": "user",
+    "kind": "maintenance",
+    "when": "The user explicitly invokes the Paperthin contribution-landing procedure for a compatible project.",
+    "roles": ["lead"],
+    "note": "Preserve contributor authorship and the target project's actual merge policy. PR reviews, comments, and remote changes require their own existing authorization. Do not auto-invoke other user-only skills mentioned by the upstream procedure."
+  },
+  {
+    "name": "ssotize",
+    "category": "breadth",
+    "invocation": "model",
+    "kind": "edit",
+    "when": "A particular fact is duplicated, scattered, stale, or contradictory across artifacts.",
+    "roles": ["lead", "worker", "reviewer", "escalation", "codex-worker", "claude-worker"],
+    "note": "Start with a read-only two-method audit. Review roles stay audit-only. Execute a concrete consolidation plan only with user authorization; preserve unique details and surface contradictions."
+  },
+  {
+    "name": "re0-upgrade",
+    "category": "breadth",
+    "invocation": "user",
+    "kind": "maintenance",
+    "when": "The user explicitly asks to maintain a separate Paperthin installation managed by npx skills.",
+    "roles": ["lead"],
+    "note": "This Pi package vendors a pinned catalog and updates through pi update. Its absence from npx skills is not a missing install. Do not add a duplicate installation, modify hooks, or star a repository automatically."
+  },
+  {
+    "name": "re0-plan",
+    "category": "coil",
+    "invocation": "user",
+    "kind": "maintenance",
+    "when": "The user explicitly requests the Paperthin repository's iteration casebook convention.",
+    "roles": ["lead"],
+    "note": "Upstream explicitly calls this paperthin-only and not portable: it assumes the full suite and .re0/iteration lifecycle. Never use it as an implicit generic project planner or start a parallel workflow directory."
+  },
+  {
+    "name": "re0-loop",
+    "category": "coil",
+    "invocation": "model",
+    "kind": "loop",
+    "when": "A long project needs repeated build, real-surface QA, and evidence-backed learning cycles.",
+    "roles": ["lead"],
+    "note": "Lead owns the only active orchestration loop. Fit re0-memo, optional nba, and justified re0-work into the current task's phases. Stop internal laps when no outside evidence enters; children must not start nested loops."
+  },
+  {
+    "name": "re0-memo",
+    "category": "coil",
+    "invocation": "model",
+    "kind": "edit",
+    "when": "A phase, attempt, QA run, or user feedback reveals a reusable lesson or a failure class for the next pass.",
+    "roles": ["lead", "worker", "codex-worker", "claude-worker"],
+    "note": "Record evidence-backed lessons and next gates in the current task's local artifacts; preserve failed paths and avoid adding process history to the shipped product."
+  },
+  {
+    "name": "re0-work",
+    "category": "coil",
+    "invocation": "model",
+    "kind": "loop",
+    "when": "Evidence shows the foundation is wrong and a controlled restart is better than another patch.",
+    "roles": ["lead"],
+    "note": "Make the preserve/discard split explicit, archive negative evidence, and test the first replacement slice in an isolated worktree when appropriate. This never grants permission to destroy existing work or spawn a nested lead."
+  },
+  {
+    "name": "catchup",
+    "category": "coil",
+    "invocation": "model",
+    "kind": "check",
+    "when": "The user returns after a gap, loses the thread, or needs an explanation of newly introduced project terms.",
+    "roles": ["lead"],
+    "note": "Brief from live files, git state, and recorded evidence; explain decisions needed before chronology. Do not act while presenting the briefing."
+  },
+  {
+    "name": "nba",
+    "category": "coil",
+    "invocation": "model",
+    "kind": "check",
+    "when": "The active workflow is between phases, blocked by too many options, or needs a state-grounded next move.",
+    "roles": ["lead"],
+    "note": "Return exactly one action with why-now and done-when. It recommends without executing; Lead retains transition ownership and user-only skills remain explicit."
+  },
+  {
+    "name": "prism",
+    "category": "mesh",
+    "invocation": "user",
+    "kind": "check",
+    "when": "The user explicitly requests independent lenses because the artifact has genuinely different failure modes.",
+    "roles": ["lead"],
+    "note": "Choose 2-5 distinct lenses, run bounded read-only jobs, and return the disagreement and resolving question. Do not equate more reviewers or majority agreement with proof."
+  }
+]

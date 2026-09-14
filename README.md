@@ -1,143 +1,97 @@
 # Pi Paperthin Orchestration
 
-어떤 프로젝트에서도 `/lead <요청>`으로 역할 분담을 시작하는 설치형 Pi 확장이다. Pi/Astra가 계획과 조율을 맡고, Pi/Sol Worker와 Claude Code/Opus Reviewer가 구현·검토한다. 기존 `pi-herdr`를 통해 Herdr pane을 사용하며 Paperthin을 요청 해석, 작업 규모 판단, 브리프·인계 검증과 문서 정리에 적용한다. Compound Engineering은 사용하지 않는다.
+어떤 프로젝트에서도 `/lead <요청>`으로 계획·구현·검토를 진행하는 설치형 Pi 확장이다. Lead는 Astra로 대화하고, 작업별 판단에 따라 Sol·Opus·Fable 자식을 독립 프로세스로 실행한다. 자식마다 터미널 pane을 만들지 않으며 Paperthin 28개 스킬에서 필요한 절차를 선택한다. Compound Engineering은 사용하지 않는다.
 
 ## 설치
 
-이 안내는 Pi, Herdr, Claude Code와 구독 로그인이 준비된 개발자를 대상으로 한다. 처음 준비한다면 [Runbook의 설치](RUNBOOK.md#2-설치와-업데이트)와 [구독 인증](RUNBOOK.md#3-구독-인증)을 먼저 따른다. `agents.zsh` 셸 함수는 선택 사항이며 없어도 아래처럼 사용할 수 있다. 기존 `pi-herdr`와 thinking 설정은 재사용한다.
+Pi와 Claude Code, 사용할 구독 로그인이 준비되어 있어야 한다. 처음 준비한다면 [Runbook의 설치](RUNBOOK.md#2-설치와-업데이트)와 [구독 인증](RUNBOOK.md#3-구독-인증)을 따른다. 기존 `agents.zsh`·thinking 설정은 재사용하며 셸 함수는 필수가 아니다.
+
+현재 확인 환경은 Pi 0.85.1, Herdr 0.9.0, Claude Code 2.1.270이다. Pi는 `/login`, Claude Code는 `claude auth status`로 인증 상태를 확인한다. 실제 호출과 미검증 범위는 [검증 기록](docs/verification.md)에 구분했다.
 
 ~~~bash
 pi install git:github.com/d0lim/pi-paperthin-orchestration
 ~~~
 
-`pi-herdr`가 없는 머신에서만 추가한다.
+대상 프로젝트마다 역할 파일을 복사할 필요가 없다. 설치 후 새 Pi를 열거나 `/reload`한다. 패키지를 업데이트할 때는 다음 명령을 사용한다.
 
 ~~~bash
-pi install npm:@andrewjacop/pi-herdr
-herdr integration install pi
+pi update git:github.com/d0lim/pi-paperthin-orchestration
 ~~~
-
-패키지는 Pi 사용자 설정에 등록된다. 대상 프로젝트마다 확장·역할 파일을 복사하거나 이 저장소 안에서 작업할 필요가 없다. 설치 후 새 Pi를 열거나 `/reload`한다.
 
 ## 프로젝트에서 사용
 
-작업할 프로젝트의 터미널에서 Herdr를 연다. 아래 경로는 자신의 프로젝트로 바꾼다.
+작업할 프로젝트에서 `pi`를 실행하고 요청한다.
 
 ~~~bash
 cd /path/to/your-project
-herdr
+pi
 ~~~
-
-Herdr 안의 pane 하나에서 해당 프로젝트로 이동해 `pi`를 실행한다. 이 Pi에 아래 요청을 입력하면 그 세션이 Lead가 된다. 이후 Worker와 Reviewer는 Lead가 Herdr를 통해 실행하므로 사용자가 별도로 시작할 필요가 없다.
 
 ~~~text
 /lead 현재 프로젝트에 필요한 변경을 구현하고 리뷰·테스트까지 진행해줘
 ~~~
 
-**일반 `pi` 세션에서는 워크플로우가 비활성 상태다.** `/lead`를 호출하거나 `--workflow-role`을 명시할 때 역할 정책을 적용한다. `/lead`는 인증된 설정에서 정확한 Lead 모델과 effort를 선택한다. 해당 모델을 사용할 수 없으면 오류를 보고하며 다른 모델이나 API 과금으로 자동 전환하지 않는다.
+이 Pi가 Lead가 되며 Worker·Reviewer는 Lead가 실행하고 결과를 회수한다. **일반 Pi는 비활성 상태로 시작한다.** `/lead`가 정확한 Lead 모델·effort와 역할 정책을 활성화한다. 사용할 수 없는 모델을 다른 모델이나 API 인증으로 자동 대체하지 않는다.
 
 ~~~text
 /workflow
+/workflow jobs
+/workflow skills
 /workflow off
 ~~~
 
-`/workflow`는 활성 여부, 역할, 현재 모델·effort, 역할 기준, 대상 프로젝트의 설정 경로와 Herdr 연결 상태를 모델 호출 없이 보여준다. `/workflow off`는 워크플로우 지침과 역할 검사를 해제해 일반 Pi 사용으로 돌아간다. 현재 모델은 유지된다.
+`/workflow`는 역할·실제 모델·기대 설정·설정 경로와 실행 환경을, `/workflow jobs`는 자식 상태를, `/workflow skills`는 호출 조건을 포함한 catalog를 보여준다. `/workflow cancel <id>`로 소유한 작업을 취소할 수 있다. `/workflow off`는 진행 중인 자식이 모두 끝나거나 취소된 뒤 사용한다. 이 명령들은 모델을 호출하지 않는다. `/lead --help`로 명령 로드를 확인할 수 있으며 `/lead`만 입력하면 여러 줄 입력창이 열린다. 활성 Lead가 작업 중이면 후속 요청으로 대기한다.
 
-설치 직후에는 `pi list`에서 패키지를 확인하고, Pi의 `/lead --help`로 명령 로드를 확인한다. Herdr 안에서 `/workflow`의 `herdr.insidePane`과 `herdr.delegateAvailable`이 모두 `true`여야 위임할 준비가 된 상태다. `/lead`를 아직 호출하지 않았다면 `active: false`는 정상이다. 이 확인은 모델을 호출하지 않으며 실제 모델 접근 검증은 첫 작업에서 별도로 이뤄진다.
+활성화 뒤 일반 입력도 같은 Lead에게 전달되며 기존 작업의 보충인지 새 목표인지 대화로 구분한다. `/workflow off`는 모델을 유지한 채 역할 지침을 해제한다. Lead는 요청 범위에서 worktree·고정 후보를 준비하고 검토된 변경을 통합한다. 커밋 금지 등 사용자의 Git 제약을 우선하고, push·PR·배포는 해당 요청이 허용한 경우에 수행한다.
 
-`/lead`만 입력하면 여러 줄 입력창이 열린다. 도움말은 `/lead --help`다. 이미 활성화한 Lead가 작업 중이면 다음 요청으로 대기하고, 일반 Pi가 작업 중이면 끝난 뒤 Lead를 활성화한다.
+계획·브리프·리뷰 근거는 대상 프로젝트의 `.agent-runs/<작업 식별자>/`, 자식의 stdout.log·stderr.log·result.json은 `.agent-runs/jobs/<session>/<job>/`에 남는다. 실행기는 jobs 안에 로컬 `.gitignore`를 만들고 Lead는 필요한 경우 프로젝트 `.gitignore`에 `.agent-runs/`를 추가한다. 기존 규칙·추적 파일·사용자 변경을 자동 제거하지 않는다. 재개 시 기록과 실제 파일을 대조하며 죽은 프로세스를 자동 재시작하지 않는다.
 
-작업을 맡길 때 사용자가 내부 도구, worktree 명령, 브리프 양식을 외울 필요는 없다. Lead가 현재 저장소의 지침·Git 상태·완료 조건을 확인하고 필요한 작업을 준비한다. 계획이나 읽기만 요청한 경우 구현·위임을 시작하지 않는다.
+프로젝트의 `AGENTS.md` 등 지침과 신뢰 설정을 존중한다. 신뢰하지 않은 프로젝트 지침·설정 때문에 활성화가 차단되면 `/trust`에서 확인한 뒤 Pi를 종료하고 다시 실행한다. 세션의 모델 표시와 프로세스 정상 종료만으로 실제 모델 접근이나 결과 품질을 증명하지 않는다.
 
-구현 위임은 Git worktree를 사용한다. 기준 커밋이 없거나 worktree를 만들 수 없으면 Lead가 제약과 필요한 준비를 알린다. 기존 변경은 보존하며 사용자가 허용한 범위에서 커밋·통합한다. 계획·브리프·해시·리뷰·Paperthin 근거는 대상 프로젝트의 `.agent-runs/<작업 식별자>/`에 남기고 Git에서 제외한다. Worker·Reviewer의 시작 출력과 결과는 Lead가 회수해 이 기록에 반영한다.
+## 역할과 모델 선택
 
-프로젝트 신뢰 확인이 나타나면 해당 프로젝트의 지침과 확장을 확인한다. 신뢰하지 않은 프로젝트의 `AGENTS.md`나 `.pi/paperthin.json` 때문에 활성화가 차단되면 `/trust`에서 확인한 뒤 Pi를 종료하고 다시 실행한다. 위임은 Herdr 안에서 수행하며 `/workflow`에서 `herdr_delegate`를 사용할 수 있는지 확인한다. 현재 세션의 모델 표시는 서버의 실제 모델 호출 성공까지 증명하는 것은 아니다.
+| 작업 | 기본 profile | 실행 | frontier 판단 때 |
+| --- | --- | --- | --- |
+| Lead 대화·조율 | 고정 Lead | Pi / Astra / high | Lead 유지 |
+| 구현 `implement` | `sol` | Pi / Sol Worker | `fable` / Claude Worker |
+| 리뷰 `review` | `opus` | Claude Code / Opus Reviewer | `fable` / Escalation |
+| 조사 `analyze` | `opus` | Claude Code / Opus Reviewer | `fable` / Escalation |
+| 독립 읽기 `probe` | `sol` | 프로젝트 문맥 없는 읽기 | 허용된 profile 선택 |
 
-## 역할과 반복 절차
+Lead가 `modelchk`의 중립 tier·effort 추천을 작성하면 executor가 허용된 profile과 실제 effort에 매핑한다. **사용자가 지정한 profile·effort가 우선**이다. 선택 결과와 이유는 작업 기록에 남으며 전역 모델 기본값을 바꾸지 않는다. `codex` 구현 profile도 명시적으로 선택할 수 있다. 이는 설정된 실행 정책이며 모델 성능을 실험으로 입증한 분류는 아니다.
 
-| 역할 | 런타임·모델 | 기본 effort |
-| --- | --- | --- |
-| Lead | Pi / `openai-codex` / `gpt-6-astra` | high |
-| Worker | Pi / `openai-codex` / `gpt-5.6-sol` | medium |
-| Reviewer | Claude Code / `claude-opus-5` | high |
-| Escalation, 선택 | Claude Code / `claude-fable-5-1` | high |
-| Codex Worker, 선택 | Codex CLI / `gpt-5.6-sol` | medium |
+Astra·Sol은 Pi의 ChatGPT 구독 경로, Opus·Fable은 Claude Code의 Claude 구독 경로를 사용한다. 실제 provider·model ID는 [roles.json](config/roles.json)에 있다.
 
-Lead가 `readchk`로 요청을 해석하고 `modelchk`로 첫 위임의 작업 규모를 판단한다. 전체 계획은 필요한 `re0` 정리를 마친 뒤 해시를 고정해 Reviewer에게 검토시킨다. 승인된 계획을 바탕으로 첫 실질 Worker 브리프를 작성하고, `shower` 독립 검토와 수정을 마친 뒤 Worker에게 전달한다.
+Fable의 headless 실행은 기본 차단한다. Claude Code의 `-p`·SDK 호출은 usage credits 대상인 Fable 요청을 확인 없이 청구할 수 있으므로, 해당 비용까지 허용한 경우에만 프로젝트 정책에서 활성화한다. 구독 모델 접근 권한만 확인한 것과 이 허용은 다르다. [Claude Code 안내](https://code.claude.com/docs/en/model-config#fable-and-usage-credits)
 
-Worker가 할당된 단계와 worktree에서 구현·테스트하고 필요한 문서 정리에 `re0`를 적용한다. Lead는 최종 사용자용 문서·인계 산출물의 `shower` 검토와 수정을 마친 뒤 코드 후보 SHA를 고정한다. Reviewer가 고정된 후보와 검증 근거를 검토하며, Lead가 필요한 수정·재검토 후 허용된 커밋·통합을 진행한다.
+개인 기본값은 `~/.pi/agent/paperthin.json`, 프로젝트 덮어쓰기는 `.pi/paperthin.json`에 둔다. profile pin·effort 매핑·Fable 정책의 정확한 형식은 [실행 설정](docs/orchestration.md#실행-설정)을 따른다.
 
-이 반복은 **지침을 읽은 Lead 모델이 진행한다.** 확장은 역할·실행 인자·지침을 연결하며 승인 순서를 코드로 강제하는 상태 머신은 아니다. pane idle, 완료 마커, 모델의 승인 문구만으로 완료를 판정하지 않는다. 실제 diff, 후보 SHA, 테스트 근거를 함께 확인한다.
+## Paperthin이 들어가는 흐름
 
-참고한 4역할 워크플로우와 현재 구성의 차이는 [reference-workflow.md](docs/reference-workflow.md)에 정리했다.
+1. `readchk`로 요청을 해석하고 `understood as: ...`를 기록한다. `modelchk`로 첫 위임과 성격이 바뀐 작업을 평가한다.
+2. 계획을 작성하고 필요한 `sip` 검사·`re0` 정리를 마친 뒤 해시를 고정해 독립 계획 리뷰를 받는다.
+3. 첫 실질 Worker 브리프를 `shower`로 독립 읽힌 뒤 구현을 맡긴다. Worker는 담당 worktree에서 구현·테스트한다.
+4. `sip`가 외부 사실의 `factchk`, 검증 설계의 `mandela`, 중복·모순 감사 등 적용할 검사를 고른다. 문서·인계의 독립 읽기와 수정을 마친 뒤 후보 SHA를 고정해 코드 리뷰를 받는다.
+5. 필요한 수정·재검토 후 허용된 범위에서 통합한다. `re0-memo`로 실제 실패·QA에서 배운 점을 다음 단계에 반영하고, 재개에는 `catchup`, 다음 행동 판단에는 `nba`를 사용한다.
 
-## 프로젝트별 설정
+28개를 매 작업에 모두 주입하거나 실행하지 않는다. Lead는 `readchk`·`modelchk`·`shower`·`re0`·`sip`, Worker 계열은 `readchk`·`re0`, Reviewer 계열은 `readchk` 원문을 기본으로 받는다. 작업에 선택된 추가 스킬만 본문을 더한다. 같은 산출물 해시의 검토 결과는 재사용하고 의미 변경 때 필요한 검토를 다시 받는다.
 
-패키지 기본값은 `config/roles.json`에 있다. 대상 프로젝트의 `.pi/paperthin.json`으로 필요한 역할 값만 덮어쓴다.
+모델이 조건에 따라 선택하는 스킬 16개와 **사용자가 명시적으로 호출하는 스킬 12개**를 구분한다. 예를 들어 `/lead 현재 계획을 macrothink로 검토해줘`는 여러 독립 읽기를 요청한다. 활성 Lead에서 `/skill:prism`처럼 원본을 직접 호출할 수도 있다. 전체 목록과 유지보수 스킬의 적용 제한은 [스킬 선택](docs/orchestration.md#스킬-선택)에 있다.
 
-~~~json
-{
-  "roles": {
-    "worker": {
-      "model": "gpt-5.6-sol",
-      "effort": "high"
-    }
-  }
-}
-~~~
+기본 자식은 동시 2개, 대기 8개, 작업당 15분으로 제한한다. Lead만 큐와 전체 반복을 소유하며 자식이 다시 위임하지 않는다. 프로세스 `completed`와 품질 승인을 구분한다. 단계 리뷰와 Paperthin 적용 순서는 Lead 지침이며, 코드가 모든 승인 전이를 강제하는 상태 머신은 아니다.
 
-이 파일은 패키지 저장소가 아닌 **실제로 작업할 프로젝트**에 둔다. 다른 역할과 전역 Pi 설정은 유지한다. 변경 후 `/workflow`에서 적용 경로와 기대 값을 확인한다.
+## Herdr 화면 구성
 
-활성 역할의 현재 provider·model·effort가 기준과 다르면 요청을 차단한다. `/lead`는 Lead의 정확한 설정을 선택하며 Worker는 생성된 실행 인자를 사용한다. `modelchk`의 추천만으로 역할 기준을 바꾸지 않는다. 기존 `pi-worker` 셸 함수가 모델만 지정한다면 그 함수 자체가 Worker 지침을 전달하는 것은 아니다.
+Herdr를 쓴다면 프로젝트 workspace 안에 Lead tab을 두고 그 안에서 `pi`를 실행한다. 대부분의 자식은 화면 없이 실행되고 `/workflow jobs`에서 확인한다. 터미널 입력이나 장기 직접 상호작용이 필요한 작업만 별도 task tab으로 연다.
 
-## Paperthin 적용과 증거
+현재 패키지는 task tab을 자동 생성하지 않는다. 기존 `workflow_prepare`·pi-herdr pane 위임은 호환 경로다. pi-herdr 0.5는 현재 pane을 분할하므로 tab을 바꿨다는 이유로 자동 task-tab 배치가 구현됐다고 가정하지 않는다. [Herdr 운영 범위](docs/orchestration.md#herdr-화면과-호환-경로)
 
-패키지 manifest가 확장과 Paperthin 원본을 등록한다. 활성 역할의 시스템 정책에는 공통·역할 지침과 아래 SKILL.md **원문 전체**를 포함한다. 나머지 스킬도 경로로 제공하며 대상 프로젝트의 `AGENTS.md` 등 기존 지침을 존중한다.
-
-| 역할 | 자동으로 전달하는 스킬 본문 |
-| --- | --- |
-| Lead | `readchk`, `modelchk`, `shower`, `re0` |
-| Worker·Codex Worker | `readchk`, `re0` |
-| Reviewer·Escalation | `readchk` |
-
-| Paperthin 스킬 | 워크플로우에서 적용하는 시점 |
-| --- | --- |
-| [readchk](vendor/paperthin/skills/readchk/SKILL.md) | 실질 작업 전에 요청을 문맥과 대조하고 기존 작업 기록·응답에 `understood as: ...` 한 줄 기록 |
-| [modelchk](vendor/paperthin/skills/modelchk/SKILL.md) | Lead가 첫 위임 전, 범위·위험·실패 양상이 바뀔 때 작업에 필요한 capability tier와 effort를 중립 척도로 추천 |
-| [shower](vendor/paperthin/skills/shower/SKILL.md) | Lead가 첫 실질 Worker 브리프와 최종 사용자용 문서·인계 산출물을 독립 세션에서 검토 |
-| [re0](vendor/paperthin/skills/re0/SKILL.md) | 문서를 반복 수정하거나 연관 문서를 동기화할 때 작성자가 전체를 읽고 기존 섹션을 정리 |
-
-`modelchk`는 `recommended_tier`, `recommended_effort`, `rationale`, `move_up_if`, `move_down_if`, `proof_surface` 여섯 필드로 판단을 남긴다. 추천은 실제 역할 설정과 구분하며 모델을 자동 변경하지 않는다. Reviewer는 `re0`가 필요한 문제를 지적할 수 있지만 파일을 수정하지 않는다.
-
-`shower`는 Lead가 `workflow_cold_read`에 산출물 경로를 주면, 도구가 읽은 **내용만** 최대 120초의 독립 Pi 호출에 전달한다. 독립 호출에는 부모 의도·대화와 도구·자동 지침·스킬·확장·세션 저장을 전달하지 않는다. 도구는 실제 읽은 내용의 `artifactSha256`와 독립 해석을 반환하며, Lead가 그 해석을 자신이 따로 기록한 의도와 비교한다. 동일 내용의 검토는 해시로 재사용하고 의미가 바뀌었을 때 재검토한다. 매 브리프마다 무조건 새 모델을 호출하지 않는다.
-
-각 역할은 기존 작업 기록·응답에 적용 내용과 근거, 조건에 해당하지 않아 생략했거나 실행에 실패한 이유를 남긴다. 본문이 시스템 정책에 들어간 사실만으로 실행 완료를 기록하지 않는다. Lead는 독립 해석·해시·문서 변경 등 실제 증거를 확인한다.
-
-사용자가 스킬 이름을 매번 지정할 필요는 없다. 특정 산출물만 점검하려면 `/lead README.md를 Paperthin shower로 검토하고 결과만 알려줘`처럼 요청할 수 있다. 적용 순서와 기록은 에이전트 지침이며, 확장이 모든 실행 여부를 강제하거나 승인하는 상태 머신은 아니다.
-
-## 내부 도구
-
-일반 사용은 `/lead`로 충분하다. 확장의 연결 구조를 확인할 때 참고한다.
-
-- `workflow_prepare`: 역할, worktree 절대경로, 브리프 파일로 `herdr_delegate` 입력을 준비한다. 실행하지 않는다.
-- `herdr_delegate`: 기존 `pi-herdr` 도구다. Lead가 준비된 JSON 전체를 전달해 에이전트를 실행하고 결과를 회수한다.
-- `workflow_cold_read`: Lead가 독립적인 shower 읽기를 요청한다.
-
-프로젝트 확장에서 Herdr 제어를 중복 구현하지 않는다. `workflow_prepare`가 반환한 `agentArgs`, `cwd`, `prompt`, `onBlocked`를 보존한다. 추가 지시는 브리프를 수정하고 다시 준비한다. timeout이면 기존 pane을 확인하고 중복 작업자를 만들지 않는다.
-
-## 개발·업데이트
-
-이 저장소의 주 산출물은 Pi 패키지다. `examples/todo-cli`는 선택적인 로컬 실습 앱이며 설치나 일반 워크플로우의 필수 단계가 아니다.
+## 개발과 확인
 
 ~~~bash
 npm test
-pi update git:github.com/d0lim/pi-paperthin-orchestration
 ~~~
 
-확장을 제거하려면 다음을 실행한다.
+제거하려면 `pi remove git:github.com/d0lim/pi-paperthin-orchestration`을 실행한다. 선택 실습 앱은 `examples/todo-cli`에 있으며 설치·일반 운영의 필수 단계가 아니다.
 
-~~~bash
-pi remove git:github.com/d0lim/pi-paperthin-orchestration
-~~~
-
-설치·구독·운영 배경은 [RUNBOOK.md](RUNBOOK.md), 참조 설계는 [reference-workflow.md](docs/reference-workflow.md), 실제 확인 범위는 [verification.md](docs/verification.md)를 참고한다. 설치·로더·모의 도구 검증과 실제 Herdr pane을 이용한 E2E 검증은 구분한다.
+[Runbook](RUNBOOK.md)은 설치·인증·운영, [orchestration.md](docs/orchestration.md)는 실행·스킬 계약, [참조 비교](docs/reference-workflow.md)는 설계 출처를 설명한다. 현재 확인된 테스트·실제 호출·UI 범위는 [verification.md](docs/verification.md)를 따른다.

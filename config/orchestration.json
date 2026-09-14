@@ -1,0 +1,12 @@
+{
+  "routing": {
+    "mode": "adaptive",
+    "allowFableHeadless": false,
+    "pins": {}
+  },
+  "jobs": {
+    "maxConcurrent": 2,
+    "maxQueued": 8,
+    "timeoutMs": 900000
+  }
+}

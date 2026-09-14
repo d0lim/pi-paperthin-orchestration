@@ -6,6 +6,9 @@ import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import test from 'node:test';
 import { buildLaunch, ROOT } from '../lib/runtime.mjs';
+import { randomUUID } from 'node:crypto';
+
+process.env.PAPERTHIN_SETTINGS_PATH = path.join(os.tmpdir(), `paperthin-no-user-${randomUUID()}.json`);
 
 const extensionPath = path.join(ROOT, 'extensions/workflow.ts');
 function installedPiPackage() {
@@ -94,6 +97,29 @@ function configure(h, role) {
   h.state.effort = role === 'worker' ? 'medium' : 'high';
 }
 
+function fakeJobs(options) {
+  const records = new Map();
+  return {
+    options, disposed: false,
+    submit({ launch, label, metadata }) {
+      const job = { id: `job-${records.size + 1}`, status: 'running', label, cwd: launch.cwd, metadata, launch, paths: {}, output: '', stderr: '' };
+      records.set(job.id, job);
+      return { ...job };
+    },
+    list() { return [...records.values()].map(job => ({ ...job })); },
+    get(id) { if (!records.has(id)) throw new Error('Unknown owned job'); return { ...records.get(id) }; },
+    async wait(id, { signal } = {}) { signal?.throwIfAborted(); return this.get(id); },
+    cancel(id) { this.get(id); records.get(id).status = 'cancelled'; return this.get(id); },
+    async dispose() { this.disposed = true; for (const job of records.values()) job.status = 'cancelled'; },
+    complete(id, text) {
+      const job = records.get(id);
+      Object.assign(job, { status: 'completed', exitCode: 0, output: JSON.stringify({ type: 'message_end', message: { role: 'assistant', model: job.metadata.route.model, content: [{ type: 'text', text }] } }) });
+    },
+  };
+}
+
+const assessment = { recommended_tier: 'standard', recommended_effort: 'thorough', rationale: 'Bounded code work', move_up_if: 'Risk increases', move_down_if: 'Mechanical change', proof_surface: 'Tests and independent review' };
+
 const sdk = installedPiPackage();
 test('installable extension contract without model or Herdr calls', {
   skip: sdk ? false : 'Installed Pi SDK unavailable.',
@@ -108,7 +134,8 @@ test('installable extension contract without model or Herdr calls', {
   const factory = await jiti.import(extensionPath, { default: true });
   function setup(cwd, role) {
     const h = harness(cwd, role);
-    factory(h.api);
+    h.managers = [];
+    factory(h.api, options => { const manager = fakeJobs(options); h.managers.push(manager); return manager; });
     return h;
   }
   async function status(h) {
@@ -124,7 +151,7 @@ test('installable extension contract without model or Herdr calls', {
     const extension = loaded.extensions[0];
     assert.equal(extension.flags.get('workflow-role').default, undefined);
     for (const name of ['workflow', 'lead']) assert.ok(extension.commands.has(name));
-    for (const name of ['workflow_prepare', 'workflow_cold_read']) assert.ok(extension.tools.has(name));
+    for (const name of ['workflow_prepare', 'workflow_cold_read', 'workflow_spawn', 'workflow_jobs', 'workflow_skills']) assert.ok(extension.tools.has(name));
     assert.ok(extension.handlers.has('input'));
     assert.ok(!extension.handlers.has('resources_discover'), 'manifest alone supplies skills');
   });
@@ -140,6 +167,7 @@ test('installable extension contract without model or Herdr calls', {
     assert.equal(h.state.effort, 'low');
     assert.equal(h.selections.length + h.requests.length + h.entries.length + h.executions.length, 0);
     for (const tool of h.tools.values()) {
+      if (tool.name === 'workflow_skills') continue;
       await assert.rejects(() => tool.execute('inactive', {}, undefined, undefined, h.ctx), /Lead/);
     }
   });
@@ -310,32 +338,70 @@ test('installable extension contract without model or Herdr calls', {
     assert.equal(h.executions.length, 0);
   });
 
-  await t.test('cold read stays isolated, bounded and cancellation-aware with no fallback', async (st) => {
+  await t.test('cold read shares the queue, returns snapshot identity and is collected through jobs', async (st) => {
     const { cwd, brief } = fixture(st), h = setup(cwd, 'lead');
     configure(h, 'lead');
     const controller = new AbortController();
     const run = () => h.tools.get('workflow_cold_read').execute('cold', { artifact: brief }, controller.signal, undefined, h.ctx);
     const result = await run();
-    const evidence = JSON.parse(result.content[0].text);
-    assert.equal(evidence.interpretation, 'Independent reading.');
-    assert.equal(evidence.artifact, result.details.sources.artifact);
-    assert.match(evidence.artifactSha256, /^[a-f0-9]{64}$/);
-    assert.equal(evidence.artifactSha256, buildLaunch({ role: 'cold-read', cwd, artifact: brief }).sources.artifactSha256);
-    const execution = h.executions[0];
-    assert.equal(execution.options.timeout, 120000);
-    assert.equal(execution.options.signal, controller.signal);
+    const submitted = JSON.parse(result.content[0].text);
+    assert.equal(submitted.artifactSha256, buildLaunch({ role: 'cold-read', cwd, artifact: brief }).sources.artifactSha256);
+    const manager = h.managers[0], execution = manager.get(submitted.id).launch;
+    assert.equal(manager.options.maxConcurrent, 2);
     for (const flag of ['--no-context-files', '--no-skills', '--no-extensions', '--no-prompt-templates', '--no-tools', '--no-session']) assert.ok(execution.args.includes(flag), flag);
     assert.ok(!execution.args.includes('-e'));
     assert.ok(!execution.args.join('\n').includes('<pi-paperthin-role:'));
-    for (const failure of [{ code: 1, killed: false }, { code: 0, killed: true }]) {
-      h.state.execResult = { stdout: '', stderr: 'Failure', ...failure };
-      const count = h.executions.length;
-      await assert.rejects(run, /자동 재시도/);
-      assert.equal(h.executions.length, count + 1);
-    }
+    manager.complete(submitted.id, 'Independent reading.');
+    const collected = await h.tools.get('workflow_jobs').execute('get', { action: 'get', id: submitted.id }, undefined, undefined, h.ctx);
+    assert.equal(collected.details.interpretation, 'Independent reading.');
+    assert.equal(collected.details.artifactSha256, submitted.artifactSha256);
+    assert.equal(collected.details.modelVerified, true);
+    assert.equal(h.executions.length, 0);
     controller.abort();
-    const count = h.executions.length;
+    const count = manager.list().length;
     await assert.rejects(run);
-    assert.equal(h.executions.length, count);
+    assert.equal(manager.list().length, count);
+  });
+
+  await t.test('managed spawn routes effort, shares child limits and preserves ownership through cancellation', async (st) => {
+    const { cwd, brief } = fixture(st), h = setup(cwd, 'lead');
+    configure(h, 'lead');
+    const result = await h.tools.get('workflow_spawn').execute('spawn', { task: 'implement', cwd, brief, assessment, skills: ['factchk'] }, undefined, undefined, h.ctx);
+    assert.equal(result.details.route.effort, 'high');
+    assert.equal(result.details.route.profile, 'sol');
+    const launch = h.managers[0].get(result.details.id).launch;
+    assert.ok(launch.args.includes('--workflow-effort'));
+    assert.ok(launch.sources.embeddedSkills.some(file => file.includes('/factchk/')));
+    await h.commands.get('workflow').handler('off', h.ctx);
+    assert.match(h.messages.at(-1).message.content, /하위 작업/);
+    await assert.rejects(() => h.tools.get('workflow_jobs').execute('cancel', { action: 'cancel', id: 'foreign' }, undefined, undefined, h.ctx), /Unknown/);
+    await h.commands.get('workflow').handler(`cancel ${result.details.id}`, h.ctx);
+    assert.equal(h.managers[0].get(result.details.id).status, 'cancelled');
+    assert.equal(h.executions.length, 0);
+  });
+
+  await t.test('session shutdown disposes only this session queue and billing failures create no jobs', async (st) => {
+    const { cwd, brief } = fixture(st), h = setup(cwd, 'lead');
+    configure(h, 'lead');
+    const spawn = data => h.tools.get('workflow_spawn').execute('spawn', { task: 'implement', cwd, brief, assessment, ...data }, undefined, undefined, h.ctx);
+    await assert.rejects(() => spawn({ assessment: { ...assessment, recommended_tier: 'frontier' } }), /usage credits/);
+    assert.equal(h.managers.length, 0);
+    await spawn({});
+    const manager = h.managers[0];
+    await h.handlers.get('session_shutdown')({}, h.ctx);
+    assert.equal(manager.disposed, true);
+    const list = await h.tools.get('workflow_jobs').execute('list', { action: 'list' }, undefined, undefined, h.ctx);
+    assert.deepEqual(list.details.jobs, []);
+  });
+
+  await t.test('managed worker effort is checked and cannot activate another scheduler', async (st) => {
+    const { cwd } = fixture(st), h = setup(cwd, 'worker');
+    configure(h, 'worker');
+    h.flags.set('workflow-effort', 'high');
+    assert.equal(h.handlers.get('input')({}, h.ctx).action, 'handled');
+    h.state.effort = 'high';
+    assert.equal(h.handlers.get('input')({}, h.ctx).action, 'continue');
+    await assert.rejects(() => h.tools.get('workflow_spawn').execute('recursive', {}, undefined, undefined, h.ctx), /Lead/);
+    assert.equal(h.managers.length, 0);
   });
 });

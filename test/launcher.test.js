@@ -6,6 +6,9 @@ import os from 'node:os';
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { buildLaunch, buildPolicy, readRoles, herdrSpec, parseArgs, ROOT, PACKAGE_ROOT } from '../scripts/agent.mjs';
+import { randomUUID } from 'node:crypto';
+
+process.env.PAPERTHIN_SETTINGS_PATH = path.join(os.tmpdir(), `paperthin-no-user-${randomUUID()}.json`);
 
 function fixture(t) {
   const dir = mkdtempSync(path.join(os.tmpdir(), 'paperthin space '));
@@ -39,7 +42,7 @@ test('worker in another checkout receives policy, exact role, selected skills an
   assert.equal(valueAfter(launch.args, '--workflow-role'), 'worker');
   assert.equal(valueAfter(launch.args, '--workflow-config'), realpathSync(dir));
   assert.ok(launch.args.includes('--no-extensions'));
-  assert.equal(launch.args.filter(a => a === '--skill').length, 4);
+  assert.equal(launch.args.filter(a => a === '--skill').length, 28);
   assert.ok(launch.args.includes('--no-skills'));
   for (const p of launch.sources.skills) assert.ok(path.isAbsolute(p) && existsSync(p));
   assert.ok(launch.prompt.includes(readFileSync(brief, 'utf8')));
@@ -196,11 +199,12 @@ test('cold read excludes project policy, role, skill catalog and tools', t => {
 test('every runtime receives complete role-specific Paperthin bodies without unrelated skill bodies', t => {
   const { dir, brief } = fixture(t);
   const expected = {
-    lead: ['readchk', 'modelchk', 'shower', 're0'],
+    lead: ['readchk', 'modelchk', 'shower', 're0', 'sip'],
     worker: ['readchk', 're0'],
     reviewer: ['readchk'],
     escalation: ['readchk'],
     'codex-worker': ['readchk', 're0'],
+    'claude-worker': ['readchk', 're0'],
   };
   for (const [role, names] of Object.entries(expected)) {
     const launch = buildLaunch({ role, cwd: dir, brief });
@@ -223,8 +227,8 @@ test('review policy supports plan artifact hashes separately from code commit id
   assert.ok(policy.includes('실제 base SHA와 candidate SHA'));
   const leadPolicy = buildPolicy('lead', { cwd: dir });
   const steps = readFileSync(leadPolicy.sources.role, 'utf8');
-  assert.ok(steps.indexOf('구현 전에 독립 Reviewer') < steps.indexOf('Worker 브리프'));
-  assert.ok(leadPolicy.policy.includes('리뷰를 통과한 변경을 Lead가'));
+  const planReview = steps.indexOf('task: review');
+  assert.ok(planReview >= 0 && planReview < steps.indexOf('task: implement'));
 });
 
 test('invalid role, missing brief and conflicting invocation modes fail before starting a runtime', t => {
@@ -243,6 +247,35 @@ test('dry-run uses no runtime or shell and does not execute brief contents', t =
   });
   assert.equal(result.status, 0, result.stderr);
   assert.equal(JSON.parse(result.stdout).runtime, 'pi');
+  assert.equal(existsSync(path.join(dir, 'SHOULD_NOT_EXIST')), false);
+});
+
+test('the actual helper CLI blocks Fable --print before any runtime can start', t => {
+  const { dir, brief } = fixture(t);
+  const script = path.join(ROOT, 'scripts/agent.mjs');
+  const personal = path.join(dir, 'absent-personal-settings.json');
+  const env = { PATH: '', PAPERTHIN_SETTINGS_PATH: personal };
+  for (const role of ['escalation', 'claude-worker']) {
+    const result = spawnSync(process.execPath, [script, role, '--cwd', dir, '--brief', brief, '--print'], {
+      cwd: dir, encoding: 'utf8', env,
+    });
+    assert.equal(result.status, 1, role);
+    assert.match(result.stderr, /Fable --print.*routing\.allowFableHeadless/);
+    assert.equal(result.stderr.includes('ENOENT'), false, 'the guard must run before spawning the unavailable runtime');
+    assert.equal(result.stdout, '');
+  }
+  configure(dir, { roles: { reviewer: { model: 'claude-fable-5-1' } } });
+  const aliased = spawnSync(process.execPath, [script, 'reviewer', '--cwd', dir, '--brief', brief, '--print'], {
+    cwd: dir, encoding: 'utf8', env,
+  });
+  assert.equal(aliased.status, 1);
+  assert.match(aliased.stderr, /routing\.allowFableHeadless/);
+  assert.equal(aliased.stderr.includes('ENOENT'), false, 'the model guard applies even to a different role');
+  const inspection = spawnSync(process.execPath, [script, 'escalation', '--cwd', dir, '--brief', brief, '--dry-run'], {
+    cwd: dir, encoding: 'utf8', env,
+  });
+  assert.equal(inspection.status, 0, inspection.stderr);
+  assert.equal(valueAfter(JSON.parse(inspection.stdout).args, '--model'), 'claude-fable-5-1');
   assert.equal(existsSync(path.join(dir, 'SHOULD_NOT_EXIST')), false);
 });
 

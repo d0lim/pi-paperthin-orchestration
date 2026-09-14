@@ -2,7 +2,7 @@
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { spawnSync } from 'node:child_process';
-import { buildLaunch, herdrSpec } from '../lib/runtime.mjs';
+import { buildLaunch, herdrSpec, readWorkflowSettings } from '../lib/runtime.mjs';
 
 export { buildPolicy, buildLaunch, herdrSpec, readRoles, PACKAGE_ROOT, ROOT, POLICY_MARKER } from '../lib/runtime.mjs';
 
@@ -32,7 +32,7 @@ export function main(argv = process.argv.slice(2)) {
   try {
     const options = parseArgs(argv);
     if (options.help) {
-      console.log('사용법: node scripts/agent.mjs <lead|worker|reviewer|escalation|codex-worker> [--cwd PATH] [--config-cwd PATH] [--brief FILE] [--dry-run|--herdr-spec|--print]\n       node scripts/agent.mjs cold-read --artifact FILE [--dry-run|--print]\n--dry-run / --herdr-spec은 모델을 호출하지 않습니다. --print는 단발 실행입니다.');
+      console.log('사용법: node scripts/agent.mjs <lead|worker|reviewer|escalation|codex-worker|claude-worker> [--cwd PATH] [--config-cwd PATH] [--brief FILE] [--dry-run|--herdr-spec|--print]\n       node scripts/agent.mjs cold-read --artifact FILE [--dry-run|--print]\n--dry-run / --herdr-spec은 모델을 호출하지 않습니다. --print는 단발 실행입니다.');
       return 0;
     }
     const launch = buildLaunch(options);
@@ -45,6 +45,10 @@ export function main(argv = process.argv.slice(2)) {
       return 0;
     }
     let args = [...launch.args];
+    if (options.print && launch.runtime === 'claude' && /^claude-fable|^fable(?:$|\[)/.test(args[args.indexOf('--model') + 1]) &&
+        !readWorkflowSettings(options.configCwd ?? launch.cwd).routing.allowFableHeadless) {
+      throw new Error('Fable --print는 usage credits 차감 허용이 필요합니다. routing.allowFableHeadless를 사용자 승인 없이 켜지 마세요.');
+    }
     if (options.print || options.role === 'cold-read') {
       if (launch.runtime === 'codex') args = ['exec', ...args.filter((arg, i) => arg !== '--ask-for-approval' && args[i - 1] !== '--ask-for-approval')];
       else args.push('-p');

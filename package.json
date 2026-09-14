@@ -1,9 +1,9 @@
 {
   "name": "pi-paperthin-orchestration",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "private": true,
   "type": "module",
-  "description": "Installable Pi orchestration with project-aware role instructions, Herdr delegation, and Paperthin skills.",
+  "description": "Installable Pi orchestration with bounded subagents, task-aware model routing, and Paperthin skills.",
   "keywords": ["pi-package", "pi", "herdr", "paperthin"],
   "repository": { "type": "git", "url": "https://github.com/d0lim/pi-paperthin-orchestration.git" },
   "pi": {

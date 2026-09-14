@@ -3,5 +3,6 @@
   "worker": { "runtime": "pi", "provider": "openai-codex", "model": "gpt-5.6-sol", "effort": "medium" },
   "reviewer": { "runtime": "claude", "model": "claude-opus-5", "effort": "high" },
   "escalation": { "runtime": "claude", "model": "claude-fable-5-1", "effort": "high" },
+  "claude-worker": { "runtime": "claude", "model": "claude-fable-5-1", "effort": "high" },
   "codex-worker": { "runtime": "codex", "model": "gpt-5.6-sol", "effort": "medium" }
 }

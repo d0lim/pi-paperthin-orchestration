@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -36,6 +37,27 @@ function installedPiPackage() {
 
 
 const sdk = installedPiPackage();
+const paperthinSource = JSON.parse(readFileSync(path.join(ROOT, 'vendor/paperthin/source.json'), 'utf8'));
+const skillCatalog = JSON.parse(readFileSync(path.join(ROOT, 'config/skills.json'), 'utf8'));
+
+test('the complete skill catalog preserves upstream content and invocation boundaries', () => {
+  assert.equal(paperthinSource.skills.length, 28);
+  assert.equal(new Set(paperthinSource.skills).size, 28);
+  assert.deepEqual(skillCatalog.map((skill) => skill.name), paperthinSource.skills);
+  assert.equal(skillCatalog.filter((skill) => skill.invocation === 'user').length, 12);
+  assert.equal(skillCatalog.filter((skill) => skill.invocation === 'model').length, 16);
+  for (const skill of skillCatalog) {
+    const relativePath = `skills/${skill.name}/SKILL.md`;
+    const contents = readFileSync(path.join(ROOT, 'vendor/paperthin', relativePath), 'utf8');
+    assert.equal(createHash('sha256').update(contents).digest('hex'), paperthinSource.sha256[relativePath]);
+    const frontmatter = contents.split('---', 3)[1];
+    assert.equal(/^disable-model-invocation: true$/m.test(frontmatter), skill.invocation === 'user');
+    assert.ok(skill.when.length > 0);
+    assert.ok(skill.roles.length > 0);
+    assert.ok(['check', 'edit', 'loop', 'maintenance'].includes(skill.kind));
+    assert.ok(['depth', 'breadth', 'coil', 'mesh'].includes(skill.category));
+  }
+});
 
 test('Pi package loads from an unrelated project with isolated settings', {
   skip: sdk ? false : 'Installed Pi SDK unavailable.',
@@ -50,8 +72,8 @@ test('Pi package loads from an unrelated project with isolated settings', {
   const { SettingsManager } = await import(pathToFileURL(path.join(sdk, 'dist/core/settings-manager.js')).href);
   const extensionPath = path.join(ROOT, 'extensions/workflow.ts');
   for (const scenario of [
-    { name: 'global package with untrusted unrelated project', options: {}, skillCount: 4 },
-    { name: 'explicit extension path deduplicates package discovery', options: { additionalExtensionPaths: [extensionPath] }, skillCount: 4 },
+    { name: 'global package with untrusted unrelated project', options: {}, skillCount: paperthinSource.skills.length },
+    { name: 'explicit extension path deduplicates package discovery', options: { additionalExtensionPaths: [extensionPath] }, skillCount: paperthinSource.skills.length },
     { name: 'noSkills suppresses manifest skills', options: { noSkills: true }, skillCount: 0 },
   ]) {
     await t.test(scenario.name, async () => {
@@ -76,7 +98,7 @@ test('Pi package loads from an unrelated project with isolated settings', {
       assert.equal(packageSkills.length, scenario.skillCount);
       if (scenario.options.noSkills) assert.equal(loaded.skills.length, 0);
       if (scenario.skillCount) {
-        assert.deepEqual(packageSkills.map((skill) => skill.name).sort(), ['modelchk', 're0', 'readchk', 'shower']);
+        assert.deepEqual(packageSkills.map((skill) => skill.name).sort(), [...paperthinSource.skills].sort());
       }
       assert.deepEqual(loader.getAgentsFiles().agentsFiles, []);
     });

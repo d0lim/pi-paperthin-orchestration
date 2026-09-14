@@ -39,20 +39,18 @@ flowchart TD
 | 항목 | 참조 킷 | Pi Paperthin Orchestration |
 | --- | --- | --- |
 | 계획과 조율 | 별도 Planner·Orchestrator | Lead/Astra가 함께 담당 |
-| 구현 | Pi Coder | Pi/Sol Worker, Codex Worker 선택 가능 |
-| 검토 | Pi Reviewer | Claude Code/Opus, plan 모드에서 텍스트 반환 |
-| 적용 범위 | 전역 파일·wrapper 설치 | Pi 패키지 설치 후 임의 프로젝트에서 활성화 |
-| 시작 | pi-orchestrator와 작업 프롬프트 | 일반 Pi에서 `/lead <요청>` |
-| Herdr 제어 | 자체 agent 도구 | 기존 pi-herdr 재사용 |
-| 스킬 | 킷 역할 지침과 선택 스킬 | 역할별 Paperthin 본문 주입과 단계별 적용·증거 기록 |
-| 프로젝트 설정 | 킷의 생성 설정 | 대상 프로젝트 `.pi/paperthin.json` |
+| 구현 | Pi Coder | 작업별 sol/fable/codex profile |
+| 검토·분석 | Pi Reviewer | opus/fable profile, 수정 없는 결과 반환 |
+| 기본 위임 | Herdr의 에이전트 pane | pane 없는 독립 headless 프로세스 |
+| 프로세스 관리 | 킷 자체 agent 도구·상태 | Lead가 소유한 bounded queue·취소·보존된 출력 |
+| 시작 | pi-orchestrator와 프롬프트 | 일반 Pi에서 `/lead <요청>` |
+| Paperthin | 킷 역할 지침과 선택 스킬 | 28개 catalog, 역할 핵심·선택 본문, invocation 구분 |
+| 프로젝트 설정 | 킷 생성 설정 | 대상 `.pi/paperthin.json`의 roles·routing·jobs |
 
-현재 기본 흐름은 Lead의 `readchk`·`modelchk` → 전체 계획 정리·해시 고정·계획 리뷰 → 첫 실질 Worker 브리프의 `shower` 검토·수정 → Worker 구현 → 최종 문서·인계의 `shower` 검토·수정 → 후보 SHA 고정·코드 리뷰 → Lead의 승인 범위 커밋·통합이다. 문서 작성자는 반복 수정·연관 문서 동기화 때 `re0`를 적용하고 필요한 `shower`와 수정을 마친 뒤 검토 대상을 고정한다. 별도 Planner 없이 Lead가 계획과 조율을 담당한다.
+현재 흐름은 Lead의 요청 해석·작업 규모 평가 → 계획 정리·해시 고정·계획 리뷰 → 첫 Worker 브리프의 독립 읽기 → 구현 → 필요한 sip 검사·수정 → 후보 고정·코드 리뷰 → 통합·학습이다. `modelchk`는 중립 추천을 만들고 executor가 허용된 profile과 실제 effort를 선택한다. 사용자 pin이 우선하며 인증·접근 실패를 자동 fallback으로 감추지 않는다.
 
-Lead의 시스템 정책에는 Paperthin 네 스킬 원문을 모두 포함한다. Worker·Codex Worker는 `readchk`·`re0`, Reviewer·Escalation은 `readchk` 본문을 받으며 나머지는 경로로 이용할 수 있다. `modelchk`의 중립 추천은 실제 모델 설정과 분리한다. `shower`는 내용을 독립 세션에 보내고 실제 읽은 내용의 `artifactSha256`와 해석을 반환한다. 동일 내용의 검토를 재사용하고 의미 변경 때 재검토하며, 모든 브리프를 무조건 호출하지 않는다. 상세 시점과 기록 기준은 [Runbook](../RUNBOOK.md#7-paperthin-적용-기준)을 따른다.
+Lead만 `workflow_spawn`·`workflow_jobs`를 사용해 작업을 배정하고 회수한다. 기본 동시 실행은 2개, 대기는 8개, 작업 실행 제한은 15분이다. `workflow_cold_read`도 같은 queue에서 내용만 읽고 해시·독립 해석을 돌려준다. `sip`·`re0-loop` 등은 Lead의 기존 반복에 통합하며 자식이 별도 scheduler를 만들지 않는다. 상세 계약은 [orchestration.md](orchestration.md)를 따른다.
 
-이 패키지도 반복 전체를 강제하는 상태 머신은 아니다. `/lead`가 정확한 모델과 역할 정책을 활성화하고, `workflow_prepare`가 실행 인자·브리프를 준비하면 Lead가 기존 `herdr_delegate`로 실행한다. 모델이 진행 순서를 판단한다. Paperthin 본문 전달도 실행 증명은 아니므로 기존 작업 기록에 적용 내용과 증거, 미적용·실패 이유를 남긴다.
+Herdr는 프로젝트 workspace와 Lead tab의 화면 구성에 사용한다. 상호작용이 필요한 작업만 수동 task tab으로 운영한다. 기존 `workflow_prepare`·pi-herdr pane 위임은 호환 경로이며 현재 pi-herdr 0.5의 `split --current` 동작을 task tab 자동 배치로 해석하지 않는다. 패키지에는 task tab 자동 어댑터가 없다.
 
-공통 지침은 현재 후보 SHA와 테스트 근거 확인, 작업자별 worktree, 다른 변경 보존, 리뷰 도중 후보 고정, 불필요한 모델·API fallback 금지를 요구한다. 이 규칙은 에이전트의 행동 지침이며 파일 권한이나 승인 이력을 검증하는 전이 엔진과 동일하지 않다.
-
-후속으로 승인·단계 전이를 코드에서 보장하려면 작업 ID, 검토 대상 SHA, 승인 증거, 허용 전이, 재시도·중단·재개 정책을 별도로 구현하고 검증해야 한다. 현재 제공 범위를 넘어선 기능이므로 설치 완료를 그 기능의 완성으로 해석하지 않는다.
+scheduler의 완료는 프로세스 종료이며 품질 승인과 다르다. 계획·코드 리뷰 순서와 Paperthin 적용은 여전히 Lead의 판단과 근거 확인이 필요하다. 코드가 승인 전이를 모두 강제하거나 새 세션에서 프로세스를 자동 재개하는 구조는 아니다. 실제 후보 SHA·diff·테스트·외부 근거를 확인하며, 고정·승인 뒤 바뀐 대상은 새 해시로 영향받는 리뷰를 다시 받는다.
