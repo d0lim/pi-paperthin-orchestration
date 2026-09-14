@@ -1,9 +1,0 @@
-{
-  "defaultProvider": "openai-codex",
-  "defaultModel": "gpt-6-astra",
-  "defaultThinkingLevel": "high",
-  "modelThinkingLevels": {
-    "openai-codex/gpt-6-astra": "high",
-    "openai-codex/gpt-5.6-sol": "medium"
-  }
-}

@@ -1,16 +1,13 @@
 import assert from 'node:assert/strict';
-import { existsSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import os from 'node:os';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import test from 'node:test';
-import { buildLaunch, ROOT } from '../scripts/agent.mjs';
+import { buildLaunch, ROOT } from '../lib/runtime.mjs';
 
-const extensionPath = path.join(ROOT, '.pi/extensions/workflow.ts');
-
-// Reuse the user's installed SDK without adding dependencies or invoking Pi/models.
-// Resolve both an npm executable and Homebrew's wrapper layout.
+const extensionPath = path.join(ROOT, 'extensions/workflow.ts');
 function installedPiPackage() {
   const candidates = [];
   if (process.env.PI_PACKAGE_DIR) candidates.push(process.env.PI_PACKAGE_DIR);
@@ -39,69 +36,67 @@ function installedPiPackage() {
   return null;
 }
 
+
 function fixture(t) {
-  const directory = mkdtempSync(path.join(os.tmpdir(), 'workflow other checkout '));
-  t.after(() => rmSync(directory, { recursive: true, force: true }));
-  const brief = path.join(directory, 'brief with spaces.md');
-  writeFileSync(brief, 'Read only. Keep literal $(touch NEVER_RUN) and `echo unsafe`.');
-  return { directory, brief };
+  const cwd = mkdtempSync(path.join(os.tmpdir(), 'paperthin-extension '));
+  t.after(() => rmSync(cwd, { recursive: true, force: true }));
+  const brief = path.join(cwd, 'brief with spaces.md');
+  writeFileSync(brief, 'Read only. Keep $(touch NEVER_RUN) literal.');
+  return { cwd, brief };
 }
 
-function fakeApi(role = 'lead', execResult = { stdout: 'Artifact needs one clarification.', stderr: '', code: 0, killed: false }) {
-  const handlers = new Map();
-  const tools = new Map();
-  const commands = new Map();
-  const flags = new Map([['workflow-role', role]]);
-  const messages = [];
-  const userMessages = [];
-  const executions = [];
-  return {
-    handlers, tools, commands, flags, messages, userMessages, executions,
-    api: {
-      on(name, handler) { handlers.set(name, handler); },
-      registerFlag(name, options) { if (!flags.has(name)) flags.set(name, options.default); },
-      getFlag(name) { return flags.get(name); },
-      registerTool(tool) { tools.set(tool.name, tool); },
-      registerCommand(name, command) { commands.set(name, command); },
-      getThinkingLevel() { return 'medium'; },
-      getAllTools() { return [{ name: 'herdr_delegate' }]; },
-      getActiveTools() { return ['herdr_delegate']; },
-      sendMessage(message, options) { messages.push({ message, options }); },
-      sendUserMessage(message, options) { userMessages.push({ message, options }); },
-      async exec(command, args, options) {
-        executions.push({ command, args, options });
-        return execResult;
-      },
+function harness(cwd, role) {
+  const handlers = new Map(), commands = new Map(), tools = new Map();
+  const flags = new Map(role === undefined ? [] : [['workflow-role', role]]);
+  const messages = [], requests = [], selections = [], entries = [], executions = [];
+  const state = {
+    model: { provider: 'ordinary', id: 'unchanged' }, effort: 'low',
+    idle: true, authenticated: true, trusted: true, branch: [], prompt: 'Ordinary project prompt.',
+    execResult: { stdout: 'Independent reading.', stderr: '', code: 0, killed: false },
+    available: { provider: 'openai-codex', id: 'gpt-6-astra' },
+  };
+  const api = {
+    on(name, handler) { handlers.set(name, handler); },
+    registerFlag(name, options) { if (!flags.has(name) && options.default !== undefined) flags.set(name, options.default); },
+    getFlag(name) { return flags.get(name); },
+    registerCommand(name, command) { commands.set(name, command); },
+    registerTool(tool) { tools.set(tool.name, tool); },
+    getThinkingLevel() { return state.effort; },
+    setThinkingLevel(level) { state.effort = level; },
+    async setModel(model) {
+      selections.push(model);
+      if (state.authenticated) state.model = model;
+      return state.authenticated;
     },
+    appendEntry(type, data) { entries.push({ type, data }); },
+    sendMessage(message, options) { messages.push({ message, options }); },
+    sendUserMessage(message, options) { requests.push({ message, options }); },
+    getActiveTools() { return ['herdr_delegate']; },
+    async exec(command, args, options) { executions.push({ command, args, options }); return state.execResult; },
   };
+  const ctx = {
+    cwd, hasUI: false,
+    get model() { return state.model; },
+    isIdle: () => state.idle,
+    isProjectTrusted: () => state.trusted,
+    getSystemPrompt: () => state.prompt,
+    modelRegistry: { find(provider, id) {
+      return state.available?.provider === provider && state.available?.id === id ? state.available : undefined;
+    } },
+    sessionManager: { getBranch: () => state.branch },
+    ui: { setStatus() {}, editor: async () => undefined },
+  };
+  return { api, ctx, state, handlers, commands, tools, flags, messages, requests, selections, entries, executions };
 }
 
-function context(directory, systemPrompt = 'Existing system prompt.') {
-  return {
-    cwd: directory,
-    hasUI: false,
-    model: { provider: 'observed-provider', id: 'observed-model' },
-    getSystemPrompt() { return systemPrompt; },
-    isIdle() { return true; },
-    ui: { notify() {}, setStatus() {}, async editor() { return undefined; } },
-  };
-}
-
-async function mustRejectTool(action) {
-  let result;
-  try {
-    result = await action();
-  } catch (error) {
-    assert.ok(error instanceof Error);
-    return;
-  }
-  assert.equal(result?.isError, true, 'invalid request must throw or return an explicit tool error');
+function configure(h, role) {
+  h.state.model = { provider: 'openai-codex', id: role === 'worker' ? 'gpt-5.6-sol' : 'gpt-6-astra' };
+  h.state.effort = role === 'worker' ? 'medium' : 'high';
 }
 
 const sdk = installedPiPackage();
-
-test('Pi workflow extension works without model or Herdr calls', {
-  skip: sdk ? false : 'Installed Pi SDK not found; CLI and launcher tests still run.',
+test('installable extension contract without model or Herdr calls', {
+  skip: sdk ? false : 'Installed Pi SDK unavailable.',
 }, async (t) => {
   const requirePi = createRequire(path.join(sdk, 'package.json'));
   const jitiManifest = requirePi.resolve('jiti/package.json');
@@ -109,356 +104,234 @@ test('Pi workflow extension works without model or Herdr calls', {
   const jitiEntry = path.resolve(path.dirname(jitiManifest), jitiMetadata.exports['./static'].import);
   const { createJiti } = await import(pathToFileURL(jitiEntry).href);
   const typebox = await import(pathToFileURL(requirePi.resolve('typebox')).href);
-  const jiti = createJiti(import.meta.url, {
-    moduleCache: false,
-    tryNative: false,
-    virtualModules: { typebox },
-  });
+  const jiti = createJiti(import.meta.url, { moduleCache: false, tryNative: false, virtualModules: { typebox } });
   const factory = await jiti.import(extensionPath, { default: true });
-
-  async function leadSession(directory) {
-    const fake = fakeApi();
-    fake.api.getThinkingLevel = () => 'high';
-    const ctx = context(directory, '<pi-paperthin-role:lead>');
-    ctx.model = { provider: 'openai-codex', id: 'gpt-6-astra' };
-    await factory(fake.api);
-    return { fake, ctx, command: fake.commands.get('lead') };
+  function setup(cwd, role) {
+    const h = harness(cwd, role);
+    factory(h.api);
+    return h;
+  }
+  async function status(h) {
+    await h.commands.get('workflow').handler('', h.ctx);
+    return JSON.parse(h.messages.at(-1).message.content);
   }
 
-  await t.test('installed Pi loader accepts the extension and registers its public surface', async () => {
+  await t.test('installed Pi loader registers commands and tools without implicit activation', async () => {
     const { loadExtensions } = await import(pathToFileURL(path.join(sdk, 'dist/core/extensions/loader.js')).href);
-    const result = await loadExtensions([extensionPath], ROOT);
-    assert.deepEqual(result.errors, []);
-    assert.equal(result.extensions.length, 1);
-    const extension = result.extensions[0];
-    assert.equal(extension.flags.get('workflow-role').default, 'lead');
-    assert.ok(extension.commands.has('workflow'));
-    assert.ok(extension.commands.has('lead'));
-    assert.ok(extension.tools.has('workflow_prepare'));
-    assert.ok(extension.tools.has('workflow_cold_read'));
-    assert.ok(extension.handlers.has('before_agent_start'));
-    assert.ok(extension.handlers.has('resources_discover'));
+    const loaded = await loadExtensions([extensionPath], ROOT);
+    assert.deepEqual(loaded.errors, []);
+    assert.equal(loaded.extensions.length, 1);
+    const extension = loaded.extensions[0];
+    assert.equal(extension.flags.get('workflow-role').default, undefined);
+    for (const name of ['workflow', 'lead']) assert.ok(extension.commands.has(name));
+    for (const name of ['workflow_prepare', 'workflow_cold_read']) assert.ok(extension.tools.has(name));
     assert.ok(extension.handlers.has('input'));
+    assert.ok(!extension.handlers.has('resources_discover'), 'manifest alone supplies skills');
   });
 
-  await t.test('input explicitly blocks invalid or conflicting roles before Pi can continue the turn', async (st) => {
-    const { directory } = fixture(st);
-    const cases = [
-      { role: 'lead', prompt: 'No injected policy yet.', action: 'continue' },
-      { role: 'worker', prompt: '<pi-paperthin-role:worker>', action: 'continue' },
-      { role: 'reviewer', prompt: 'No injected policy yet.', action: 'handled' },
-      { role: 'worker', prompt: '<pi-paperthin-role:lead>', action: 'handled' },
-      { role: 'lead', prompt: '<pi-paperthin-role:worker>', action: 'handled' },
-      // The matching marker must not hide an additional conflicting policy.
-      { role: 'worker', prompt: '<pi-paperthin-role:worker>\n<pi-paperthin-role:lead>', action: 'handled' },
-    ];
-    for (const scenario of cases.flatMap((entry) => ['interactive', 'extension'].map((source) => ({ ...entry, source })))) {
-      const fake = fakeApi(scenario.role);
-      fake.api.getThinkingLevel = () => scenario.role === 'worker' ? 'medium' : 'high';
-      const ctx = context(directory, scenario.prompt);
-      ctx.model = { provider: 'openai-codex', id: scenario.role === 'worker' ? 'gpt-5.6-sol' : 'gpt-6-astra' };
-      await factory(fake.api);
-      const result = await fake.handlers.get('input')({
-        source: scenario.source, text: 'Implement the requested change.', images: [],
-      }, ctx);
-      assert.equal(result.action, scenario.action, `${scenario.source}: ${scenario.role}: ${scenario.prompt}`);
-      const errors = fake.messages.filter((item) => item.message.customType === 'workflow-error');
-      assert.equal(errors.length, scenario.action === 'handled' ? 1 : 0);
-      if (errors.length > 0) {
-        assert.match(errors[0].message.content, /중단/);
-        assert.equal(errors[0].message.display, true);
-        assert.equal(errors[0].options.triggerTurn, false);
-      }
-      assert.equal(fake.executions.length, 0);
+  await t.test('plain Pi requests and system prompt remain untouched before activation', async (st) => {
+    const { cwd } = fixture(st), h = setup(cwd);
+    h.state.trusted = false;
+    writeFileSync(path.join(cwd, 'AGENTS.md'), 'Untrusted project instruction.');
+    assert.deepEqual(h.handlers.get('input')({}, h.ctx), { action: 'continue' });
+    assert.equal(h.handlers.get('before_agent_start')({ systemPrompt: 'Original' }, h.ctx), undefined);
+    assert.equal((await status(h)).active, false);
+    assert.deepEqual(h.state.model, { provider: 'ordinary', id: 'unchanged' });
+    assert.equal(h.state.effort, 'low');
+    assert.equal(h.selections.length + h.requests.length + h.entries.length + h.executions.length, 0);
+    for (const tool of h.tools.values()) {
+      await assert.rejects(() => tool.execute('inactive', {}, undefined, undefined, h.ctx), /Lead/);
     }
   });
 
-  await t.test('input blocks provider, model, or effort fallback before any work starts', async (st) => {
-    const { directory } = fixture(st);
+  await t.test('lead selects exact authenticated configuration and persists activation before sending literal request', async (st) => {
+    const { cwd } = fixture(st), h = setup(cwd);
+    const request = '  Implement $(touch NEVER_RUN).\nKeep every line.  ';
+    await h.commands.get('lead').handler(request, h.ctx);
+    assert.deepEqual(h.selections, [{ provider: 'openai-codex', id: 'gpt-6-astra' }]);
+    assert.equal(h.state.effort, 'high');
+    assert.deepEqual(h.entries, [{ type: 'paperthin-workflow', data: { role: 'lead', cwd: path.resolve(cwd) } }]);
+    assert.deepEqual(h.requests, [{ message: request, options: { deliverAs: 'followUp', expandPromptTemplates: false } }]);
+    assert.equal((await status(h)).active, true);
+    const injected = h.handlers.get('before_agent_start')({ systemPrompt: 'Original' }, h.ctx);
+    assert.match(injected.systemPrompt, /<pi-paperthin-role:lead>/);
+    assert.ok(injected.systemPrompt.startsWith('Original'));
+    h.state.prompt = injected.systemPrompt;
+    assert.equal(h.handlers.get('before_agent_start')({ systemPrompt: injected.systemPrompt }, h.ctx), undefined);
+    assert.equal(h.executions.length, 0);
+    assert.equal(existsSync(path.join(cwd, 'NEVER_RUN')), false);
+  });
+
+  await t.test('help, headless empty input and editor cancellation never activate', async (st) => {
+    const { cwd } = fixture(st);
+    for (const args of ['', ' \n ', '--help', '-h', 'help']) {
+      const h = setup(cwd);
+      await h.commands.get('lead').handler(args, h.ctx);
+      assert.equal(h.messages.at(-1).message.customType, 'workflow-help');
+      assert.equal(h.selections.length + h.entries.length + h.requests.length, 0);
+    }
+    for (const answer of [undefined, '', ' \n ']) {
+      const h = setup(cwd);
+      h.ctx.hasUI = true;
+      h.ctx.ui.editor = async () => answer;
+      await h.commands.get('lead').handler('', h.ctx);
+      assert.equal(h.selections.length + h.entries.length + h.requests.length + h.messages.length, 0);
+    }
+    const h = setup(cwd);
+    h.ctx.hasUI = true;
+    h.ctx.ui.editor = async () => 'Investigate\nthis project.';
+    await h.commands.get('lead').handler('', h.ctx);
+    assert.equal(h.requests[0].message, 'Investigate\nthis project.');
+    assert.equal(h.entries[0].data.role, 'lead');
+  });
+
+  await t.test('missing model, failed authentication and untrusted project prevent activation and request', async (st) => {
+    const { cwd } = fixture(st);
+    for (const reason of ['missing', 'auth', 'trust']) {
+      const h = setup(cwd);
+      if (reason === 'missing') h.state.available = undefined;
+      if (reason === 'auth') h.state.authenticated = false;
+      if (reason === 'trust') {
+        h.state.trusted = false;
+        writeFileSync(path.join(cwd, 'AGENTS.md'), 'Project policy.');
+      }
+      await h.commands.get('lead').handler('Implement a change.', h.ctx);
+      assert.equal(h.messages.at(-1).message.customType, 'workflow-error', reason);
+      assert.equal(h.requests.length + h.entries.length, 0, reason);
+      assert.equal(h.state.effort, 'low', reason);
+      assert.deepEqual(h.state.model, { provider: 'ordinary', id: 'unchanged' });
+      assert.equal(h.executions.length, 0);
+    }
+  });
+
+  await t.test('inactive busy sessions reject activation while active busy Lead queues follow-up', async (st) => {
+    const { cwd } = fixture(st), h = setup(cwd);
+    h.state.idle = false;
+    await h.commands.get('lead').handler('Next work.', h.ctx);
+    assert.equal(h.requests.length + h.selections.length + h.entries.length, 0);
+    h.state.idle = true;
+    await h.commands.get('lead').handler('First work.', h.ctx);
+    h.state.idle = false;
+    await h.commands.get('lead').handler('Next work.', h.ctx);
+    assert.equal(h.selections.length, 1);
+    assert.equal(h.requests.length, 2);
+    assert.deepEqual(h.requests[1].options, { deliverAs: 'followUp', expandPromptTemplates: false });
+    await h.commands.get('workflow').handler('off', h.ctx);
+    assert.equal(h.entries.length, 1, 'busy off must not persist deactivation');
+  });
+
+  await t.test('explicit roles validate model and policy without selecting or persisting another model', async (st) => {
+    const { cwd } = fixture(st);
     for (const role of ['lead', 'worker']) {
-      const expectedModel = role === 'lead' ? 'gpt-6-astra' : 'gpt-5.6-sol';
-      const expectedEffort = role === 'lead' ? 'high' : 'medium';
-      const cases = ['provider', 'model', 'effort', 'missing-model']
-        .flatMap((mismatch) => ['interactive', 'extension'].map((source) => ({ mismatch, source })));
-      for (const { mismatch, source } of cases) {
-        const fake = fakeApi(role);
-        const ctx = context(directory, `<pi-paperthin-role:${role}>`);
-        ctx.model = {
-          provider: mismatch === 'provider' ? 'unexpected-provider' : 'openai-codex',
-          id: mismatch === 'model' ? 'unexpected-fallback-model' : expectedModel,
-        };
-        if (mismatch === 'missing-model') ctx.model = undefined;
-        fake.api.getThinkingLevel = () => mismatch === 'effort' ? 'low' : expectedEffort;
-        await factory(fake.api);
-        const result = await fake.handlers.get('input')({
-          source, text: 'Implement the requested change.', images: [],
-        }, ctx);
-        assert.equal(result.action, 'handled', `${source}: ${role}: ${mismatch}`);
-        const errors = fake.messages.filter((item) => item.message.customType === 'workflow-error');
-        assert.equal(errors.length, 1);
-        assert.ok(errors[0].message.content.includes(`openai-codex/${expectedModel}`));
-        assert.ok(errors[0].message.content.includes(`thinking ${expectedEffort}`));
-        assert.equal(errors[0].options.triggerTurn, false);
-        assert.equal(fake.executions.length, 0);
+      const h = setup(cwd, role);
+      configure(h, role);
+      assert.equal(h.handlers.get('input')({}, h.ctx).action, 'continue');
+      for (const mismatch of ['provider', 'model', 'effort', 'policy']) {
+        configure(h, role);
+        h.state.prompt = 'Original';
+        if (mismatch === 'provider') h.state.model.provider = 'fallback';
+        if (mismatch === 'model') h.state.model.id = 'fallback';
+        if (mismatch === 'effort') h.state.effort = 'low';
+        if (mismatch === 'policy') h.state.prompt = '<pi-paperthin-role:lead>\n<pi-paperthin-role:worker>';
+        assert.equal(h.handlers.get('input')({}, h.ctx).action, 'handled', role + ': ' + mismatch);
       }
+      assert.equal(h.selections.length + h.entries.length + h.executions.length, 0);
+      await h.commands.get('workflow').handler('off', h.ctx);
+      assert.equal(h.messages.at(-1).message.customType, 'workflow-error');
+    }
+    const invalid = setup(cwd, 'reviewer');
+    assert.equal(invalid.handlers.get('input')({}, invalid.ctx).action, 'handled');
+    const worker = setup(cwd, 'worker');
+    configure(worker, 'worker');
+    await worker.commands.get('lead').handler('Do lead work.', worker.ctx);
+    assert.equal(worker.requests.length + worker.selections.length, 0);
+    await assert.rejects(() => worker.tools.get('workflow_prepare').execute('x', {}, undefined, undefined, worker.ctx), /Lead/);
+  });
+
+  await t.test('off deactivates input and policy while retaining the selected model', async (st) => {
+    const { cwd } = fixture(st), h = setup(cwd);
+    await h.commands.get('lead').handler('Inspect.', h.ctx);
+    await h.commands.get('workflow').handler('off', h.ctx);
+    assert.deepEqual(h.entries.at(-1).data, { role: null, cwd: path.resolve(cwd) });
+    assert.equal((await status(h)).active, false);
+    assert.equal(h.state.model.id, 'gpt-6-astra');
+    h.state.model = { provider: 'ordinary', id: 'another' };
+    h.state.effort = 'low';
+    assert.equal(h.handlers.get('input')({}, h.ctx).action, 'continue');
+    assert.equal(h.handlers.get('before_agent_start')({ systemPrompt: 'Normal' }, h.ctx), undefined);
+  });
+
+  await t.test('session restore uses latest valid entry only for the current project', async (st) => {
+    const { cwd } = fixture(st);
+    const entry = (role, directory = path.resolve(cwd)) => ({ type: 'custom', customType: 'paperthin-workflow', data: { role, cwd: directory } });
+    const cases = [
+      { branch: [entry('lead')], active: true },
+      { branch: [entry('lead', '/unrelated/project')], active: false },
+      { branch: [entry('lead'), entry(null)], active: false },
+      { branch: [entry(null), entry('lead')], active: true },
+      { branch: [entry('worker')], active: false },
+      { branch: [entry('lead'), { type: 'custom', customType: 'other', data: { role: null, cwd } }], active: true },
+    ];
+    for (const scenario of cases) {
+      const h = setup(cwd);
+      configure(h, 'lead');
+      h.state.branch = scenario.branch;
+      h.handlers.get('session_start')({}, h.ctx);
+      assert.equal((await status(h)).active, scenario.active);
+      assert.equal(h.selections.length + h.entries.length + h.requests.length, 0);
     }
   });
 
-  await t.test('lead sends the original request as a follow-up whether the session is idle or busy', async (st) => {
-    const { directory } = fixture(st);
-    const request = '  /literal-template Inspect $(touch NEVER_RUN) and `echo unsafe`.\nPreserve this second line.  ';
-    for (const idle of [true, false]) {
-      const { fake, ctx, command } = await leadSession(directory);
-      ctx.isIdle = () => idle;
-      ctx.ui.editor = async () => assert.fail('An inline request must not open the editor');
-      await command.handler(request, ctx);
-      assert.deepEqual(fake.userMessages, [{
-        message: request,
-        options: { deliverAs: 'followUp', expandPromptTemplates: false },
-      }]);
-      assert.equal(fake.messages.length, 0);
-      assert.equal(fake.executions.length, 0);
-    }
-    assert.equal(existsSync(path.join(directory, 'NEVER_RUN')), false);
+  await t.test('project role overrides select the exact configured Lead', async (st) => {
+    const { cwd } = fixture(st);
+    mkdirSync(path.join(cwd, '.pi'));
+    writeFileSync(path.join(cwd, '.pi/paperthin.json'), JSON.stringify({ roles: { lead: { model: 'configured-astra', effort: 'medium' } } }));
+    const h = setup(cwd);
+    h.state.available = { provider: 'openai-codex', id: 'configured-astra' };
+    await h.commands.get('lead').handler('Inspect.', h.ctx);
+    assert.equal(h.state.model.id, 'configured-astra');
+    assert.equal(h.state.effort, 'medium');
+    assert.equal(h.requests.length, 1);
   });
 
-  await t.test('lead opens the multiline editor and sends only a nonblank submitted request', async (st) => {
-    const { directory } = fixture(st);
-    const submitted = '  Investigate this issue.\nKeep $(touch NEVER_RUN) and `echo unsafe` literal.\n';
-    for (const response of [submitted, undefined, '', ' \n\t ']) {
-      const { fake, ctx, command } = await leadSession(directory);
-      const editorTitles = [];
-      ctx.hasUI = true;
-      ctx.ui.editor = async (title) => { editorTitles.push(title); return response; };
-      await command.handler('', ctx);
-      assert.deepEqual(editorTitles, ['Lead에게 요청할 작업']);
-      assert.deepEqual(fake.userMessages, response === submitted ? [{
-        message: submitted,
-        options: { deliverAs: 'followUp', expandPromptTemplates: false },
-      }] : []);
-      assert.equal(fake.messages.length, 0);
-      assert.equal(fake.executions.length, 0);
-    }
-    assert.equal(existsSync(path.join(directory, 'NEVER_RUN')), false);
-  });
-
-  await t.test('lead help and an empty headless command show usage without submitting work', async (st) => {
-    const { directory } = fixture(st);
-    for (const args of ['', ' \n ', '--help', 'help', '-h']) {
-      const { fake, ctx, command } = await leadSession(directory);
-      ctx.hasUI = args.trim().length > 0;
-      ctx.ui.editor = async () => assert.fail('Help or an empty headless command must not open the editor');
-      await command.handler(args, ctx);
-      assert.equal(fake.messages.length, 1);
-      const [{ message, options }] = fake.messages;
-      assert.equal(message.customType, 'workflow-help');
-      assert.match(message.content, /\/lead/);
-      assert.equal(message.display, true);
-      assert.equal(options.triggerTurn, false);
-      assert.equal(fake.userMessages.length, 0);
-      assert.equal(fake.executions.length, 0);
-    }
-  });
-
-  await t.test('lead rejects worker sessions, conflicting policy, and provider/model/effort mismatches', async (st) => {
-    const { directory } = fixture(st);
-    for (const mismatch of ['worker', 'invalid-role', 'policy', 'provider', 'model', 'effort', 'missing-model']) {
-      const { fake, ctx, command } = await leadSession(directory);
-      if (mismatch === 'worker') {
-        fake.flags.set('workflow-role', 'worker');
-        ctx.getSystemPrompt = () => '<pi-paperthin-role:worker>';
-        ctx.model = { provider: 'openai-codex', id: 'gpt-5.6-sol' };
-        fake.api.getThinkingLevel = () => 'medium';
-      }
-      if (mismatch === 'invalid-role') fake.flags.set('workflow-role', 'reviewer');
-      if (mismatch === 'policy') ctx.getSystemPrompt = () => '<pi-paperthin-role:lead>\n<pi-paperthin-role:worker>';
-      if (mismatch === 'provider') ctx.model.provider = 'unexpected-provider';
-      if (mismatch === 'model') ctx.model.id = 'unexpected-model';
-      if (mismatch === 'effort') fake.api.getThinkingLevel = () => 'low';
-      if (mismatch === 'missing-model') ctx.model = undefined;
-      ctx.hasUI = true;
-      ctx.ui.editor = async () => assert.fail('Invalid routing must be rejected before opening the editor');
-      for (const args of ['Implement the requested change.', '']) {
-        await command.handler(args, ctx);
-        assert.equal(fake.userMessages.length, 0, mismatch);
-        const { message, options } = fake.messages.at(-1);
-        assert.equal(message.customType, 'workflow-error', mismatch);
-        assert.equal(message.display, true);
-        assert.equal(options.triggerTurn, false);
-      }
-      assert.equal(fake.messages.length, 2, mismatch);
-      assert.equal(fake.executions.length, 0);
-    }
-  });
-
-  await t.test('lead revalidates routing when the model changes while the editor is open', async (st) => {
-    const { directory } = fixture(st);
-    const { fake, ctx, command } = await leadSession(directory);
-    let finishEditing;
-    ctx.hasUI = true;
-    ctx.ui.editor = () => new Promise((resolve) => { finishEditing = resolve; });
-    const pending = command.handler('', ctx);
-    assert.equal(typeof finishEditing, 'function');
-    ctx.model = { provider: 'openai-codex', id: 'unexpected-fallback-model' };
-    finishEditing('Implement the requested change.');
-    await pending;
-    assert.equal(fake.userMessages.length, 0);
-    assert.equal(fake.messages.length, 1);
-    const [{ message, options }] = fake.messages;
-    assert.equal(message.customType, 'workflow-error');
-    assert.ok(message.content.includes('openai-codex/gpt-6-astra'));
-    assert.equal(message.display, true);
-    assert.equal(options.triggerTurn, false);
-    assert.equal(fake.executions.length, 0);
-  });
-
-  await t.test('worker policy and pinned skills load outside the source checkout without duplicate policy', async (st) => {
-    const { directory } = fixture(st);
-    const fake = fakeApi('worker');
-    await factory(fake.api);
-    const callback = fake.handlers.get('before_agent_start');
-    const injected = await callback({ systemPrompt: 'Existing system prompt.' }, context(directory));
-    assert.ok(injected.systemPrompt.startsWith('Existing system prompt.'));
-    assert.ok(injected.systemPrompt.includes(readFileSync(path.join(ROOT, 'AGENTS.md'), 'utf8')));
-    assert.ok(injected.systemPrompt.includes(readFileSync(path.join(ROOT, '.workflow/roles/worker.md'), 'utf8')));
-    const repeated = await callback({ systemPrompt: injected.systemPrompt }, context(directory));
-    const effectivePrompt = repeated?.systemPrompt ?? injected.systemPrompt;
-    assert.equal(effectivePrompt, injected.systemPrompt);
-    assert.throws(() => callback({ systemPrompt: '<pi-paperthin-role:lead>' }, context(directory)), /역할/);
-    assert.throws(() => callback({ systemPrompt: '<pi-paperthin-role:worker>\n<pi-paperthin-role:lead>' }, context(directory)), /역할/);
-    const resources = await fake.handlers.get('resources_discover')({ reason: 'startup' }, context(directory));
-    assert.equal(resources.skillPaths.length, 4);
-    for (const skill of ['readchk', 'modelchk', 'shower', 're0']) {
-      const expected = realpathSync(path.join(ROOT, 'vendor/paperthin/skills', skill, 'SKILL.md'));
-      assert.ok(resources.skillPaths.some((resource) => path.isAbsolute(resource) && realpathSync(resource) === expected));
-    }
-    assert.equal(fake.executions.length, 0);
-  });
-
-  await t.test('prepare returns the exact launcher specification and never spawns an agent', async (st) => {
-    const { directory, brief } = fixture(st);
-    const fake = fakeApi();
-    await factory(fake.api);
-    const prepare = fake.tools.get('workflow_prepare');
+  await t.test('prepare returns exact project-aware delegation arguments without spawning', async (st) => {
+    const { cwd, brief } = fixture(st), h = setup(cwd, 'lead');
+    configure(h, 'lead');
     for (const role of ['worker', 'reviewer', 'escalation', 'codex-worker']) {
-      const name = `test-${role}`;
-      const result = await prepare.execute('prepare-test', { role, cwd: directory, brief, name }, undefined, undefined, context(ROOT));
-      assert.notEqual(result.isError, true);
-      const launch = buildLaunch({ role, cwd: directory, brief });
+      const result = await h.tools.get('workflow_prepare').execute('prepare', { role, cwd, brief: path.basename(brief), name: 'test-' + role }, undefined, undefined, h.ctx);
+      const launch = buildLaunch({ role, cwd, configCwd: cwd, brief });
       assert.deepEqual(result.details.spec.agentArgs, launch.args);
       assert.equal(result.details.spec.prompt, launch.prompt);
-      assert.equal(result.details.spec.cwd, realpathSync(directory));
-      assert.equal(result.details.spec.agent, launch.runtime);
-      assert.equal(result.details.spec.name, name);
-      assert.equal(result.details.spec.onBlocked, 'return');
-      assert.deepEqual(result.details.sources, launch.sources);
       assert.deepEqual(JSON.parse(result.content[0].text), result.details.spec);
+      assert.equal(result.details.spec.onBlocked, 'return');
     }
-    assert.equal(fake.executions.length, 0);
-    assert.equal(existsSync(path.join(directory, 'NEVER_RUN')), false);
+    await assert.rejects(() => h.tools.get('workflow_prepare').execute('relative', { role: 'worker', cwd: '.', brief }, undefined, undefined, h.ctx), /절대경로/);
+    await assert.rejects(() => h.tools.get('workflow_prepare').execute('lead', { role: 'lead', cwd, brief }, undefined, undefined, h.ctx), /역할/);
+    assert.equal(h.executions.length, 0);
   });
 
-  await t.test('prepare resolves relative briefs from Lead cwd and rejects ambiguous child cwd', async (st) => {
-    const { directory, brief } = fixture(st);
-    const fake = fakeApi();
-    await factory(fake.api);
-    const prepare = fake.tools.get('workflow_prepare');
-    const result = await prepare.execute('relative-brief', {
-      role: 'worker', cwd: ROOT, brief: path.basename(brief),
-    }, undefined, undefined, context(directory));
-    assert.equal(result.details.sources.brief, realpathSync(brief));
-    assert.equal(result.details.spec.cwd, ROOT);
-    await mustRejectTool(() => prepare.execute('relative-cwd', {
-      role: 'worker', cwd: '.', brief,
-    }, undefined, undefined, context(directory)));
-    assert.equal(fake.executions.length, 0);
-  });
-
-  await t.test('workers cannot prepare children or invoke cold-read and Lead cannot prepare another Lead', async (st) => {
-    const { directory, brief } = fixture(st);
-    const worker = fakeApi('worker');
-    await factory(worker.api);
-    await mustRejectTool(() => worker.tools.get('workflow_prepare').execute('denied', {
-      role: 'worker', cwd: directory, brief,
-    }, undefined, undefined, context(directory)));
-    await mustRejectTool(() => worker.tools.get('workflow_cold_read').execute('denied', {
-      artifact: brief,
-    }, undefined, undefined, context(directory)));
-    assert.equal(worker.executions.length, 0);
-    const lead = fakeApi();
-    await factory(lead.api);
-    await mustRejectTool(() => lead.tools.get('workflow_prepare').execute('denied', {
-      role: 'lead', cwd: directory, brief,
-    }, undefined, undefined, context(directory)));
-    assert.equal(lead.executions.length, 0);
-    const invalidRole = fakeApi('reviewer');
-    await factory(invalidRole.api);
-    assert.throws(() => invalidRole.handlers.get('resources_discover')({}, context(directory)), /workflow-role/);
-  });
-
-  await t.test('status reports the runtime model separately from expected routing without model turn', async (st) => {
-    const { directory } = fixture(st);
-    const fake = fakeApi();
-    await factory(fake.api);
-    await fake.commands.get('workflow').handler('status', context(directory));
-    const sent = fake.messages.find((item) => item.message.customType === 'workflow-status');
-    assert.ok(sent);
-    const status = JSON.parse(sent.message.content);
-    assert.equal(status.role, 'lead');
-    assert.deepEqual(status.actualModel, { provider: 'observed-provider', model: 'observed-model', effort: 'medium' });
-    assert.equal(status.expected.model, 'gpt-6-astra');
-    assert.match(status.next, /\/lead/);
-    assert.equal(status.sources.skills.length, 4);
-    assert.equal(sent.options.triggerTurn, false);
-    assert.equal(fake.executions.length, 0);
-  });
-
-  await t.test('cold-read forwards cancellation and bounds a tool-free isolated Pi process', async (st) => {
-    const { directory, brief } = fixture(st);
-    const fake = fakeApi();
-    await factory(fake.api);
+  await t.test('cold read stays isolated, bounded and cancellation-aware with no fallback', async (st) => {
+    const { cwd, brief } = fixture(st), h = setup(cwd, 'lead');
+    configure(h, 'lead');
     const controller = new AbortController();
-    const result = await fake.tools.get('workflow_cold_read').execute('cold-test', {
-      artifact: brief,
-    }, controller.signal, undefined, context(directory));
-    assert.notEqual(result.isError, true);
-    assert.match(result.content[0].text, /Artifact needs one clarification/);
-    assert.equal(fake.executions.length, 1);
-    const execution = fake.executions[0];
-    assert.equal(execution.command, 'pi');
-    assert.equal(execution.options.timeout, 120_000);
+    const run = () => h.tools.get('workflow_cold_read').execute('cold', { artifact: brief }, controller.signal, undefined, h.ctx);
+    const result = await run();
+    assert.equal(result.content[0].text, 'Independent reading.');
+    const execution = h.executions[0];
+    assert.equal(execution.options.timeout, 120000);
     assert.equal(execution.options.signal, controller.signal);
-    assert.equal(realpathSync(execution.options.cwd), realpathSync(directory));
-    for (const flag of ['--no-context-files', '--no-skills', '--no-extensions', '--no-prompt-templates', '--no-tools', '--no-session', '--system-prompt', '--append-system-prompt']) {
-      assert.ok(execution.args.includes(flag), flag);
-    }
+    for (const flag of ['--no-context-files', '--no-skills', '--no-extensions', '--no-prompt-templates', '--no-tools', '--no-session']) assert.ok(execution.args.includes(flag), flag);
     assert.ok(!execution.args.includes('-e'));
-    assert.ok(!execution.args.includes('--extension'));
     assert.ok(!execution.args.join('\n').includes('<pi-paperthin-role:'));
-    assert.ok(execution.args.at(-1).includes(readFileSync(brief, 'utf8')));
-    assert.equal(existsSync(path.join(directory, 'NEVER_RUN')), false);
-  });
-
-  await t.test('cold-read process errors remain explicit failures', async (st) => {
-    const { directory, brief } = fixture(st);
-    for (const failure of [
-      { stdout: '', stderr: 'Model unavailable.', code: 1, killed: false },
-      { stdout: 'Partial output', stderr: '', code: 0, killed: true },
-    ]) {
-      const fake = fakeApi('lead', failure);
-      await factory(fake.api);
-      await mustRejectTool(() => fake.tools.get('workflow_cold_read').execute('failed-cold', {
-        artifact: brief,
-      }, undefined, undefined, context(directory)));
-      assert.equal(fake.executions.length, 1);
+    for (const failure of [{ code: 1, killed: false }, { code: 0, killed: true }]) {
+      h.state.execResult = { stdout: '', stderr: 'Failure', ...failure };
+      const count = h.executions.length;
+      await assert.rejects(run, /자동 재시도/);
+      assert.equal(h.executions.length, count + 1);
     }
-    const cancelled = fakeApi();
-    await factory(cancelled.api);
-    const controller = new AbortController();
     controller.abort();
-    await mustRejectTool(() => cancelled.tools.get('workflow_cold_read').execute('cancelled-cold', {
-      artifact: brief,
-    }, controller.signal, undefined, context(directory)));
-    assert.equal(cancelled.executions.length, 0);
+    const count = h.executions.length;
+    await assert.rejects(run);
+    assert.equal(h.executions.length, count);
   });
 });

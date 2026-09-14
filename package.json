@@ -1,18 +1,27 @@
 {
-  "name": "pi-paperthin-orchestration-example",
-  "version": "0.1.0",
+  "name": "pi-paperthin-orchestration",
+  "version": "0.2.0",
   "private": true,
   "type": "module",
-  "description": "A small task CLI for practicing Pi, Herdr, and Paperthin workflows.",
+  "description": "Installable Pi orchestration with project-aware role instructions, Herdr delegation, and Paperthin skills.",
+  "keywords": ["pi-package", "pi", "herdr", "paperthin"],
+  "repository": { "type": "git", "url": "https://github.com/d0lim/pi-paperthin-orchestration.git" },
+  "pi": {
+    "extensions": ["./extensions/workflow.ts"],
+    "skills": ["./vendor/paperthin/skills"]
+  },
+  "files": ["extensions", "lib", "config", "instructions", "scripts", "vendor", "docs", "README.md", "RUNBOOK.md"],
+  "peerDependencies": { "@earendil-works/pi-coding-agent": "*", "typebox": "*" },
+  "peerDependenciesMeta": { "@earendil-works/pi-coding-agent": { "optional": true }, "typebox": { "optional": true } },
   "engines": {
     "node": ">=22"
   },
   "scripts": {
-    "test": "node --test test/*.test.js",
-    "tasks": "node src/cli.js",
+    "test": "node --test test/*.test.js examples/todo-cli/test/*.test.js",
+    "test:example": "npm --prefix examples/todo-cli test",
     "lead": "node scripts/agent.mjs lead",
     "worker": "node scripts/agent.mjs worker",
     "reviewer": "node scripts/agent.mjs reviewer",
-    "inspect:worker": "node scripts/agent.mjs worker --brief .workflow/briefs/load-check.md --dry-run"
+    "inspect:worker": "node scripts/agent.mjs worker --brief examples/briefs/load-check.md --dry-run"
   }
 }

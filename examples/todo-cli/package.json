@@ -1,0 +1,9 @@
+{
+  "name": "paperthin-todo-example",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node --test test/*.test.js",
+    "tasks": "node src/cli.js"
+  }
+}

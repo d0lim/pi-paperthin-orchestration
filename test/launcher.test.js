@@ -1,11 +1,11 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, writeFileSync, rmSync, existsSync, readFileSync, realpathSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync, existsSync, readFileSync, realpathSync } from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { buildLaunch, herdrSpec, parseArgs, ROOT } from '../scripts/agent.mjs';
+import { buildLaunch, buildPolicy, readRoles, herdrSpec, parseArgs, ROOT, PACKAGE_ROOT } from '../scripts/agent.mjs';
 
 function fixture(t) {
   const dir = mkdtempSync(path.join(os.tmpdir(), 'paperthin space '));
@@ -15,6 +15,17 @@ function fixture(t) {
   return { dir, brief };
 }
 
+function configure(dir, value) {
+  mkdirSync(path.join(dir, '.pi'), { recursive: true });
+  writeFileSync(path.join(dir, '.pi/paperthin.json'), JSON.stringify(value));
+}
+
+function valueAfter(args, flag) {
+  const index = args.indexOf(flag);
+  assert.ok(index >= 0, `missing ${flag}`);
+  return args[index + 1];
+}
+
 test('worker in another checkout receives policy, exact role, selected skills and full brief', t => {
   const { dir, brief } = fixture(t);
   const launch = buildLaunch({ role: 'worker', cwd: dir, brief });
@@ -22,12 +33,115 @@ test('worker in another checkout receives policy, exact role, selected skills an
   assert.equal(launch.args[launch.args.indexOf('--model') + 1], 'gpt-5.6-sol');
   assert.equal(launch.args[launch.args.indexOf('--thinking') + 1], 'medium');
   const policy = launch.args[launch.args.indexOf('--append-system-prompt') + 1];
-  assert.ok(policy.includes(readFileSync(path.join(ROOT, 'AGENTS.md'), 'utf8')));
-  assert.ok(policy.includes(readFileSync(path.join(ROOT, '.workflow/roles/worker.md'), 'utf8')));
+  assert.ok(policy.includes(readFileSync(path.join(ROOT, 'instructions/common.md'), 'utf8')));
+  assert.ok(policy.includes(readFileSync(path.join(ROOT, 'instructions/roles/worker.md'), 'utf8')));
+  assert.equal(valueAfter(launch.args, '-e'), realpathSync(path.join(ROOT, 'extensions/workflow.ts')));
+  assert.equal(valueAfter(launch.args, '--workflow-role'), 'worker');
+  assert.equal(valueAfter(launch.args, '--workflow-config'), realpathSync(dir));
+  assert.ok(launch.args.includes('--no-extensions'));
   assert.equal(launch.args.filter(a => a === '--skill').length, 4);
   assert.ok(launch.args.includes('--no-skills'));
   for (const p of launch.sources.skills) assert.ok(path.isAbsolute(p) && existsSync(p));
   assert.ok(launch.prompt.includes(readFileSync(brief, 'utf8')));
+});
+
+test('policy uses bundled support files and identifies target instructions without injecting them', t => {
+  const { dir } = fixture(t);
+  writeFileSync(path.join(dir, 'AGENTS.md'), 'TARGET_SENTINEL: use the target build system.');
+  const { policy, sources } = buildPolicy('lead', { cwd: dir });
+  assert.equal(ROOT, PACKAGE_ROOT);
+  assert.equal(sources.common, realpathSync(path.join(ROOT, 'instructions/common.md')));
+  assert.equal(sources.role, realpathSync(path.join(ROOT, 'instructions/roles/lead.md')));
+  assert.equal(sources.project, realpathSync(path.join(dir, 'AGENTS.md')));
+  assert.equal(sources.config, null);
+  assert.equal(sources.defaults, realpathSync(path.join(ROOT, 'config/roles.json')));
+  assert.ok(policy.includes(realpathSync(dir)));
+  assert.ok(!policy.includes('TARGET_SENTINEL'));
+  assert.ok(!policy.includes('node src/cli.js'));
+  assert.ok(!policy.includes('npm test'));
+});
+
+test('plain project launches Lead with the canonical extension and retains Herdr discovery', t => {
+  const { dir } = fixture(t);
+  const launch = buildLaunch({ role: 'lead', cwd: dir });
+  assert.equal(valueAfter(launch.args, '-e'), realpathSync(path.join(ROOT, 'extensions/workflow.ts')));
+  assert.equal(valueAfter(launch.args, '--workflow-role'), 'lead');
+  assert.equal(valueAfter(launch.args, '--workflow-config'), realpathSync(dir));
+  assert.ok(!launch.args.includes('--no-extensions'));
+});
+
+test('partial project roles inherit defaults without changing bundled configuration', t => {
+  const { dir } = fixture(t);
+  const before = readFileSync(path.join(ROOT, 'config/roles.json'), 'utf8');
+  configure(dir, { roles: { worker: { provider: 'custom-provider', model: 'custom-worker', effort: 'high' }, reviewer: { model: 'custom-reviewer' } } });
+  const roles = readRoles(dir);
+  assert.deepEqual(roles.worker, { runtime: 'pi', provider: 'custom-provider', model: 'custom-worker', effort: 'high' });
+  assert.equal(roles.reviewer.runtime, 'claude');
+  assert.equal(roles.reviewer.model, 'custom-reviewer');
+  assert.equal(roles.reviewer.effort, 'high');
+  assert.equal(roles.lead.model, 'gpt-6-astra');
+  assert.equal(readFileSync(path.join(ROOT, 'config/roles.json'), 'utf8'), before);
+  assert.equal(buildPolicy('worker', { cwd: dir }).sources.config, realpathSync(path.join(dir, '.pi/paperthin.json')));
+});
+
+test('child launch inherits the Lead configuration origin across a different worktree', t => {
+  const { dir, brief } = fixture(t);
+  const worktree = path.join(dir, 'other worktree');
+  mkdirSync(worktree);
+  configure(dir, { roles: { worker: { provider: 'lead-provider', model: 'lead-worker', effort: 'high' } } });
+  configure(worktree, { roles: { worker: { model: 'wrong-child-default' } } });
+  const launch = buildLaunch({ role: 'worker', cwd: worktree, configCwd: dir, brief });
+  assert.equal(valueAfter(launch.args, '--provider'), 'lead-provider');
+  assert.equal(valueAfter(launch.args, '--model'), 'lead-worker');
+  assert.equal(valueAfter(launch.args, '--thinking'), 'high');
+  assert.equal(valueAfter(launch.args, '--workflow-config'), realpathSync(dir));
+  assert.equal(launch.sources.config, realpathSync(path.join(dir, '.pi/paperthin.json')));
+  assert.equal(launch.cwd, realpathSync(worktree));
+});
+
+test('untrusted project configuration is skipped without hiding errors in trusted configuration', t => {
+  const { dir } = fixture(t);
+  configure(dir, { roles: { worker: { model: 'untrusted-worker' } } });
+  assert.equal(readRoles(dir, { projectTrusted: false }).worker.model, 'gpt-5.6-sol');
+  assert.equal(readRoles(dir).worker.model, 'untrusted-worker');
+  writeFileSync(path.join(dir, '.pi/paperthin.json'), '{broken JSON');
+  assert.equal(readRoles(dir, { projectTrusted: false }).worker.model, 'gpt-5.6-sol');
+  assert.throws(() => readRoles(dir), SyntaxError);
+});
+
+test('configuration rejects unknown fields, roles, runtimes, types and effort values', t => {
+  const { dir } = fixture(t);
+  const invalid = [
+    null, [], { unexpected: true }, { roles: [] }, { roles: null },
+    { roles: { unknown: {} } }, { roles: { worker: null } },
+    { roles: { worker: { command: 'custom' } } },
+    { roles: { worker: { runtime: 'claude' } } },
+    { roles: { worker: { runtime: 'shell' } } },
+    { roles: { worker: { provider: 12 } } },
+    { roles: { reviewer: { provider: 'ignored-provider' } } },
+    { roles: { escalation: { provider: 'ignored-provider' } } },
+    { roles: { 'codex-worker': { provider: 'ignored-provider' } } },
+    { roles: { worker: { model: '' } } },
+    { roles: { worker: { model: ' padded ' } } },
+    { roles: { worker: { model: 'two\nlines' } } },
+    { roles: { worker: { effort: 'ultra' } } },
+    { roles: { reviewer: { effort: 'minimal' } } },
+    { roles: { 'codex-worker': { effort: false } } },
+  ];
+  for (const input of invalid) {
+    configure(dir, input);
+    assert.throws(() => readRoles(dir), undefined, JSON.stringify(input));
+  }
+  configure(dir, {});
+  assert.equal(readRoles(dir).worker.model, 'gpt-5.6-sol');
+  configure(dir, { roles: { worker: { runtime: 'pi', effort: 'max' } } });
+  assert.equal(readRoles(dir).worker.effort, 'max');
+});
+
+test('runtime API resolves relative brief and artifact paths against target cwd', t => {
+  const { dir, brief } = fixture(t);
+  assert.equal(buildLaunch({ role: 'worker', cwd: dir, brief: path.basename(brief) }).sources.brief, realpathSync(brief));
+  assert.equal(buildLaunch({ role: 'cold-read', cwd: dir, artifact: path.basename(brief) }).sources.artifact, realpathSync(brief));
 });
 
 test('reviewer receives plan mode and explicit skill paths outside the source checkout', t => {
@@ -57,14 +171,32 @@ test('Herdr spec preserves argv and literal brief content, and returns on a bloc
 
 test('cold read excludes project policy, role, skill catalog and tools', t => {
   const { dir, brief } = fixture(t);
+  configure(dir, { roles: { worker: { provider: 'cold-read-provider', model: 'cold-read-model', effort: 'high' } } });
   const launch = buildLaunch({ role: 'cold-read', cwd: dir, artifact: brief });
   for (const flag of ['--no-context-files', '--no-skills', '--no-extensions', '--no-prompt-templates', '--no-tools', '--no-session']) assert.ok(launch.args.includes(flag));
   // Explicit neutral prompts suppress separately discovered SYSTEM/APPEND_SYSTEM files.
   assert.ok(launch.args.includes('--system-prompt'));
   assert.ok(!launch.args[launch.args.indexOf('--append-system-prompt') + 1].includes('AGENTS'));
   assert.ok(!launch.prompt.includes(ROOT));
+  assert.equal(valueAfter(launch.args, '--provider'), 'cold-read-provider');
+  assert.equal(valueAfter(launch.args, '--model'), 'cold-read-model');
+  assert.equal(valueAfter(launch.args, '--thinking'), 'high');
+  assert.ok(!launch.args.includes('-e'));
+  assert.ok(!launch.args.includes('--workflow-role'));
+  assert.ok(!launch.args.includes('--skill'));
   assert.ok(launch.prompt.includes(readFileSync(brief, 'utf8')));
   assert.throws(() => buildLaunch({ role: 'cold-read', cwd: dir, artifact: brief, brief }), /브리프/);
+});
+
+test('review policy supports plan artifact hashes separately from code commit identities', t => {
+  const { dir } = fixture(t);
+  const policy = buildPolicy('reviewer', { cwd: dir }).policy;
+  assert.ok(policy.includes('계획 파일의 실제 SHA-256'));
+  assert.ok(policy.includes('계획 검토에는 코드 base/candidate SHA를 요구하지 않는다'));
+  assert.ok(policy.includes('실제 base SHA와 candidate SHA'));
+  const leadPolicy = buildPolicy('lead', { cwd: dir }).policy;
+  assert.ok(leadPolicy.indexOf('구현 전에 독립 Reviewer') < leadPolicy.indexOf('Worker 브리프'));
+  assert.ok(leadPolicy.includes('리뷰를 통과한 변경을 Lead가'));
 });
 
 test('invalid role, missing brief and conflicting invocation modes fail before starting a runtime', t => {
@@ -86,14 +218,27 @@ test('dry-run uses no runtime or shell and does not execute brief contents', t =
   assert.equal(existsSync(path.join(dir, 'SHOULD_NOT_EXIST')), false);
 });
 
-test('native skill entry points resolve to one unmodified pinned source', () => {
+test('CLI resolves relative input files from invocation cwd and supports a separate config origin', t => {
+  const { dir, brief } = fixture(t);
+  const worktree = path.join(dir, 'worktree');
+  mkdirSync(worktree);
+  configure(dir, { roles: { worker: { model: 'from-origin' } } });
+  const result = spawnSync(process.execPath, [path.join(ROOT, 'scripts/agent.mjs'), 'worker', '--cwd', 'worktree',
+    '--config-cwd', '.', '--brief', path.basename(brief), '--dry-run'], { cwd: dir, encoding: 'utf8', env: { PATH: '' } });
+  assert.equal(result.status, 0, result.stderr);
+  const launch = JSON.parse(result.stdout);
+  assert.equal(launch.sources.brief, realpathSync(brief));
+  assert.equal(launch.cwd, realpathSync(worktree));
+  assert.equal(valueAfter(launch.args, '--model'), 'from-origin');
+  assert.equal(valueAfter(launch.args, '--workflow-config'), realpathSync(dir));
+});
+
+test('all advertised skill paths use the unmodified pinned vendor source', t => {
+  const { dir } = fixture(t);
   const base = path.join(ROOT, 'vendor/paperthin');
   const manifest = JSON.parse(readFileSync(path.join(base, 'source.json'), 'utf8'));
-  for (const name of manifest.skills) {
-    for (const scope of ['.pi', '.claude', '.agents']) {
-      assert.equal(realpathSync(path.join(ROOT, scope, 'skills', name)), realpathSync(path.join(base, 'skills', name)));
-    }
-  }
+  assert.deepEqual(buildPolicy('lead', { cwd: dir }).sources.skills,
+    manifest.skills.map(name => realpathSync(path.join(base, 'skills', name, 'SKILL.md'))));
   for (const [relative, expected] of Object.entries(manifest.sha256)) {
     assert.equal(createHash('sha256').update(readFileSync(path.join(base, relative))).digest('hex'), expected, relative);
   }
