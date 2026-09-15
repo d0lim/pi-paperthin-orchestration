@@ -7,6 +7,7 @@ import { pathToFileURL } from 'node:url';
 import test from 'node:test';
 import { buildLaunch, ROOT } from '../lib/runtime.mjs';
 import { randomUUID } from 'node:crypto';
+import { execFileSync } from 'node:child_process';
 
 process.env.PAPERTHIN_SETTINGS_PATH = path.join(os.tmpdir(), `paperthin-no-user-${randomUUID()}.json`);
 
@@ -110,10 +111,20 @@ function fakeJobs(options) {
     get(id) { if (!records.has(id)) throw new Error('Unknown owned job'); return { ...records.get(id) }; },
     async wait(id, { signal } = {}) { signal?.throwIfAborted(); return this.get(id); },
     cancel(id) { this.get(id); records.get(id).status = 'cancelled'; return this.get(id); },
-    async dispose() { this.disposed = true; for (const job of records.values()) job.status = 'cancelled'; },
+    async dispose() { this.disposed = true; for (const job of records.values()) if (['queued', 'running'].includes(job.status)) job.status = 'cancelled'; },
     complete(id, text) {
       const job = records.get(id);
-      Object.assign(job, { status: 'completed', exitCode: 0, output: JSON.stringify({ type: 'message_end', message: { role: 'assistant', model: job.metadata.route.model, content: [{ type: 'text', text }] } }) });
+      const { runtime, model } = job.metadata.route;
+      const output = runtime === 'claude'
+        ? JSON.stringify({ type: 'result', result: text, is_error: false, modelUsage: { [model]: {} } })
+        : runtime === 'codex'
+          ? [
+            { type: 'thread.started', thread_id: `thread-${id}`, model },
+            { type: 'item.completed', item: { type: 'agent_message', text } },
+            { type: 'turn.completed' },
+          ].map(event => JSON.stringify(event)).join('\n')
+          : JSON.stringify({ type: 'message_end', message: { role: 'assistant', model, content: [{ type: 'text', text }] } });
+      Object.assign(job, { status: 'completed', exitCode: 0, output });
     },
   };
 }
@@ -151,7 +162,7 @@ test('installable extension contract without model or Herdr calls', {
     const extension = loaded.extensions[0];
     assert.equal(extension.flags.get('workflow-role').default, undefined);
     for (const name of ['workflow', 'lead']) assert.ok(extension.commands.has(name));
-    for (const name of ['workflow_prepare', 'workflow_cold_read', 'workflow_spawn', 'workflow_jobs', 'workflow_skills']) assert.ok(extension.tools.has(name));
+    for (const name of ['workflow_prepare', 'workflow_cold_read', 'workflow_spawn', 'workflow_jobs', 'workflow_skills', 'workflow_run', 'workflow_tab']) assert.ok(extension.tools.has(name));
     assert.ok(extension.handlers.has('input'));
     assert.ok(!extension.handlers.has('resources_discover'), 'manifest alone supplies skills');
   });
@@ -304,7 +315,7 @@ test('installable extension contract without model or Herdr calls', {
       const h = setup(cwd);
       configure(h, 'lead');
       h.state.branch = scenario.branch;
-      h.handlers.get('session_start')({}, h.ctx);
+      await h.handlers.get('session_start')({}, h.ctx);
       assert.equal((await status(h)).active, scenario.active);
       assert.equal(h.selections.length + h.entries.length + h.requests.length, 0);
     }
@@ -366,11 +377,11 @@ test('installable extension contract without model or Herdr calls', {
   await t.test('managed spawn routes effort, shares child limits and preserves ownership through cancellation', async (st) => {
     const { cwd, brief } = fixture(st), h = setup(cwd, 'lead');
     configure(h, 'lead');
-    const result = await h.tools.get('workflow_spawn').execute('spawn', { task: 'implement', cwd, brief, assessment, skills: ['factchk'] }, undefined, undefined, h.ctx);
-    assert.equal(result.details.route.effort, 'high');
-    assert.equal(result.details.route.profile, 'sol');
+    const result = await h.tools.get('workflow_spawn').execute('spawn', { task: 'analyze', cwd, brief, assessment, skills: ['factchk'] }, undefined, undefined, h.ctx);
+    assert.equal(result.details.route.effort, 'xhigh');
+    assert.equal(result.details.route.profile, 'opus');
     const launch = h.managers[0].get(result.details.id).launch;
-    assert.ok(launch.args.includes('--workflow-effort'));
+    assert.ok(launch.args.includes('--effort'));
     assert.ok(launch.sources.embeddedSkills.some(file => file.includes('/factchk/')));
     await h.commands.get('workflow').handler('off', h.ctx);
     assert.match(h.messages.at(-1).message.content, /하위 작업/);
@@ -383,7 +394,7 @@ test('installable extension contract without model or Herdr calls', {
   await t.test('session shutdown disposes only this session queue and billing failures create no jobs', async (st) => {
     const { cwd, brief } = fixture(st), h = setup(cwd, 'lead');
     configure(h, 'lead');
-    const spawn = data => h.tools.get('workflow_spawn').execute('spawn', { task: 'implement', cwd, brief, assessment, ...data }, undefined, undefined, h.ctx);
+    const spawn = data => h.tools.get('workflow_spawn').execute('spawn', { task: 'analyze', cwd, brief, assessment, ...data }, undefined, undefined, h.ctx);
     await assert.rejects(() => spawn({ assessment: { ...assessment, recommended_tier: 'frontier' } }), /usage credits/);
     assert.equal(h.managers.length, 0);
     await spawn({});
@@ -392,6 +403,119 @@ test('installable extension contract without model or Herdr calls', {
     assert.equal(manager.disposed, true);
     const list = await h.tools.get('workflow_jobs').execute('list', { action: 'list' }, undefined, undefined, h.ctx);
     assert.deepEqual(list.details.jobs, []);
+  });
+
+  await t.test('implementation and review require persistent run identity before launching', async (st) => {
+    const { cwd, brief } = fixture(st), h = setup(cwd, 'lead');
+    configure(h, 'lead');
+    for (const task of ['implement','review']) {
+      await assert.rejects(() => h.tools.get('workflow_spawn').execute('ungated', { task, cwd, brief, assessment }, undefined, undefined, h.ctx), /runId/);
+    }
+    assert.equal(h.managers.length, 0);
+    await assert.rejects(() => h.tools.get('workflow_tab').execute('outside', { workspaceId:'test', cwd, label:'review',role:'reviewer',brief }, undefined, undefined, h.ctx), /HERDR_ENV/);
+  });
+
+  await t.test('registered tools complete a reviewed workflow with real Git worktrees and asynchronous checks', async (st) => {
+    const directory = realpathSync(mkdtempSync(path.join(os.tmpdir(), 'paperthin extension workflow ')));
+    const cwd = path.join(directory, 'project');
+    mkdirSync(cwd);
+    const git = (target, ...args) => execFileSync('git', ['-C', target, ...args], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
+    const h = setup(cwd, 'lead');
+    configure(h, 'lead');
+    st.after(async () => {
+      await h.handlers.get('session_shutdown')({}, h.ctx);
+      rmSync(directory, { recursive: true, force: true });
+    });
+    git(cwd, 'init', '-q', '-b', 'main');
+    git(cwd, 'config', 'user.name', 'Extension Workflow Test');
+    git(cwd, 'config', 'user.email', 'extension-test@example.invalid');
+    mkdirSync(path.join(cwd, '.pi'));
+    writeFileSync(path.join(cwd, '.pi', 'paperthin.json'), JSON.stringify({ routing: { allowFableHeadless: true } }));
+    writeFileSync(path.join(cwd, 'feature.txt'), 'before\n');
+    git(cwd, 'add', '.pi/paperthin.json', 'feature.txt');
+    git(cwd, 'commit', '-qm', 'Fixture baseline');
+    const originalSha = git(cwd, 'rev-parse', 'HEAD');
+    const originalBranch = git(cwd, 'branch', '--show-current');
+    const plan = path.join(directory, 'plan with spaces.md');
+    const brief = path.join(directory, 'brief with spaces.md');
+    writeFileSync(plan, 'Change feature.txt to after; verify its exact contents.\n');
+    writeFileSync(brief, 'Follow the supplied plan and return the requested evidence.\n');
+    const invoke = async (tool, params, signal) => (await h.tools.get(tool).execute('workflow-regression', params, signal, undefined, h.ctx)).details;
+    const run = await invoke('workflow_run', { action: 'start', runId: 'extension-flow', plan });
+    const runId = run.runId;
+    const task = await invoke('workflow_run', { action: 'task', runId, taskId: 'feature', files: ['feature.txt'], brief });
+    assert.notEqual(task.worktree, cwd);
+    const spawn = (phase, taskId) => invoke('workflow_spawn', { task: phase === 'implement' ? 'implement' : 'review', phase, runId, taskId, brief, assessment });
+    await assert.rejects(() => spawn('implement', 'feature'), /plan approval/i);
+
+    async function review(phase, taskId, expectedProfile) {
+      const submitted = await spawn(phase, taskId);
+      const manager = h.managers[0];
+      const job = manager.get(submitted.id);
+      assert.equal(submitted.route.profile, expectedProfile);
+      assert.equal(submitted.route.runtime, 'claude');
+      assert.equal(job.metadata.workflow.runId, runId);
+      assert.equal(job.metadata.workflow.taskId, taskId ?? null);
+      assert.ok(job.launch.prompt.includes(JSON.stringify(readFileSync(plan, 'utf8'))));
+      const approval = { phase, ...job.metadata.reviewTarget, verdict: 'approve', findings: [] };
+      manager.complete(job.id, JSON.stringify(approval));
+      // Runtime completion reaches the persistent state only through collection.
+      const beforeCollection = await invoke('workflow_run', { action: 'get', runId });
+      assert.equal(beforeCollection.attempts.find(attempt => attempt.jobId === job.id).status, 'running');
+      const collected = await invoke('workflow_jobs', { action: 'wait', id: job.id, waitMs: 0 });
+      assert.equal(collected.workflow.status, 'succeeded');
+      assert.equal(collected.runtimeError, false);
+      assert.equal(collected.modelVerified, true);
+      assert.deepEqual(collected.reviewResult, approval);
+      return collected;
+    }
+
+    const planReview = await review('plan_review', undefined, 'fable');
+    assert.equal(planReview.reviewResult.planSha256, run.plan.sha256);
+    const implementation = await spawn('implement', 'feature');
+    assert.equal(implementation.route.profile, 'codex');
+    assert.equal(implementation.route.runtime, 'codex');
+    const manager = h.managers[0];
+    assert.equal(manager.get(implementation.id).cwd, task.worktree);
+    manager.complete(implementation.id, 'Implementation finished; commit and validate the candidate.');
+    const implemented = await invoke('workflow_jobs', { action: 'get', id: implementation.id });
+    assert.equal(implemented.workflow.status, 'succeeded');
+    assert.equal(implemented.modelVerified, true);
+    writeFileSync(path.join(task.worktree, 'feature.txt'), 'after\n');
+    git(task.worktree, 'add', 'feature.txt');
+    git(task.worktree, 'commit', '-qm', 'Implement feature');
+    const candidate = await invoke('workflow_run', { action: 'freeze', runId, taskId: 'feature' });
+    await assert.rejects(() => spawn('code_review', 'feature'), /passing checks/);
+
+    const argv = [process.execPath, '-e', "const assert=require('node:assert/strict'); const fs=require('node:fs'); assert.equal(fs.readFileSync('feature.txt','utf8'),'after\\n'); console.log('Verified feature contents.');"];
+    const checkSignal = new AbortController().signal;
+    const checked = await invoke('workflow_run', { action: 'check', runId, taskId: 'feature', argv, timeoutMs: 5000 }, checkSignal);
+    assert.equal(checked.status, 'passed');
+    assert.equal(checked.candidateSha, candidate.candidateSha);
+    assert.match(checked.stdout, /Verified feature contents/);
+    await review('code_review', 'feature', 'opus');
+    const integrated = await invoke('workflow_run', { action: 'integrate', runId });
+    assert.equal(integrated.status, 'integrated');
+    assert.equal(readFileSync(path.join(integrated.worktree, 'feature.txt'), 'utf8'), 'after\n');
+    await assert.rejects(() => invoke('workflow_run', { action: 'complete', runId }), /passing checks/);
+    const finalCheck = await invoke('workflow_run', { action: 'check', runId, argv, timeoutMs: 5000 }, checkSignal);
+    assert.equal(finalCheck.status, 'passed');
+    assert.equal(finalCheck.candidateSha, integrated.candidateSha);
+    await assert.rejects(() => invoke('workflow_run', { action: 'complete', runId }), /final integration code review/);
+    const finalReview = await review('code_review', undefined, 'opus');
+    assert.equal(finalReview.reviewResult.candidateSha, integrated.candidateSha);
+    const completed = await invoke('workflow_run', { action: 'complete', runId });
+    assert.equal(completed.status, 'completed');
+    assert.equal(completed.approvals.length, 3);
+    assert.deepEqual(completed.integration.finalCheckIds, [finalCheck.id]);
+    assert.equal(git(cwd, 'rev-parse', 'HEAD'), originalSha);
+    assert.equal(git(cwd, 'branch', '--show-current'), originalBranch);
+    assert.equal(readFileSync(path.join(cwd, 'feature.txt'), 'utf8'), 'before\n');
+    assert.equal(git(cwd, 'status', '--porcelain'), '');
+    assert.equal(h.executions.length, 0, 'checks execute through the owned check runner, not an agent or Herdr');
+    await h.handlers.get('session_shutdown')({}, h.ctx);
+    assert.equal(manager.disposed, true);
+    assert.deepEqual((await invoke('workflow_jobs', { action: 'list' })).jobs, []);
   });
 
   await t.test('managed worker effort is checked and cannot activate another scheduler', async (st) => {

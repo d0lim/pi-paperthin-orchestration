@@ -1,71 +1,113 @@
 # 실행과 Paperthin 운영 계약
 
-사용자는 `/lead`로 목표를 맡긴다. Lead 한 명이 계획·작업 큐·리뷰·통합을 소유하고 자식은 독립 프로세스에서 정해진 작업을 수행한다. 여기서는 패키지의 실행 정책을 설명하며 기본 설치는 [README](../README.md)를 따른다.
+Lead 한 명이 계획·작업 큐·검토·통합을 소유한다. `workflow_run`은 영속 상태와 승인 조건, `workflow_spawn`·`workflow_jobs`는 독립 프로세스 실행과 결과 회수를 담당한다. [전체 구조](architecture.md)
 
 ## 실행 설정
 
-번들 기본값 → 개인 `~/.pi/agent/paperthin.json` → 신뢰한 프로젝트 `.pi/paperthin.json` 순서로 필요한 필드를 덮어쓴다. `PAPERTHIN_SETTINGS_PATH` 환경변수로 개인 설정 파일 경로를 지정할 수도 있다. 기본 파일은 [roles.json](../config/roles.json)과 [orchestration.json](../config/orchestration.json)이다. `roles`는 runtime·provider·model·effort, `routing`은 작업별 profile 선택, `jobs`는 프로세스 한도를 정한다.
+번들 기본값 → 개인 `~/.pi/agent/paperthin.json` → 신뢰한 프로젝트 `.pi/paperthin.json` 순서로 덮어쓴다. `PAPERTHIN_SETTINGS_PATH`는 개인 설정 경로를 지정한다. 기본값은 [roles.json](../config/roles.json), [orchestration.json](../config/orchestration.json)이다.
 
-~~~json
+```json
 {
   "routing": {
     "mode": "adaptive",
     "allowFableHeadless": false,
-    "pins": {}
+    "pins": {},
+    "phases": {
+      "plan_review": "fable",
+      "implement": "codex",
+      "code_review": "opus"
+    }
   },
-  "jobs": {
-    "maxConcurrent": 2,
-    "maxQueued": 8,
-    "timeoutMs": 900000
-  }
+  "jobs": { "maxConcurrent": 2, "maxQueued": 8, "timeoutMs": 900000 }
 }
-~~~
+```
 
-`adaptive`는 작업 종류와 `modelchk` assessment를 매핑한다. `fixed`는 기본 profile과 설정된 역할 effort를 유지한다. `pins`와 이번 요청의 명시적 `profile`은 자동 선택보다 우선하며, 서로 충돌하면 오류를 반환한다. 예를 들어 `"pins": { "implement": "sol", "review": "opus" }`는 구현·리뷰 profile을 고정한다. 실제 effort는 개인·프로젝트의 `roles.<role>.effort`로 고정할 수 있고 중립 추천보다 우선한다.
-
-| task | 기본 profile | frontier profile | 허용 profile |
+| phase | task | 기본 profile | 실행 |
 | --- | --- | --- | --- |
-| implement | sol | fable | sol, fable, codex |
-| review | opus | fable | opus, fable |
-| analyze | opus | fable | opus, fable |
-| probe | sol | fable | sol, opus, fable |
+| plan_review | review | fable | Claude CLI / Fable |
+| implement | implement | codex | Codex CLI / Sol |
+| code_review | review | opus | Claude CLI / Opus |
 
-profile은 작업에 따라 역할에 연결된다. sol은 Pi Worker, codex는 Codex Worker다. opus는 Reviewer이며 fable은 구현 시 Claude Worker, 검토·분석 시 Escalation 역할이다. Lead의 현재 모델을 자식의 profile로 바꾸지 않는다. 정확한 모델 ID는 [roles.json](../config/roles.json)이 기준이다.
+사용자 task pin → 호출의 명시 profile → phase 기본값 → phase 없는 작업의 adaptive/fixed 순으로 선택한다. pin과 명시 profile이 다르면 오류다. `pins.review`는 계획·작업·통합 리뷰 모두에 적용되므로 각각 다른 모델을 원하면 `routing.phases`를 사용한다. `sol`은 Pi Worker, `codex`는 Codex Worker다. Lead는 Pi/Astra를 유지한다.
 
-`modelchk`는 다음 여섯 필드의 중립 추천을 반환한다. 모델 제품명이나 실제 provider 설정은 이 평가에 섞지 않는다.
+phase 없는 `analyze`는 기본 Opus, `workflow_cold_read`의 probe는 기본 Pi/Sol이며 adaptive frontier는 Fable이다. 사용자 effort는 `roles.<role>.effort`에서 고정한다. fixed 모드는 역할 effort를 유지한다. 중립 추천의 Pi/Codex 매핑은 minimal/medium/high/max, Claude는 low/high/xhigh/max다.
 
-~~~text
-recommended_tier: fast|standard|frontier
-recommended_effort: glance|measured|thorough|exhaustive
-rationale: 두 추천의 공통 이유
-move_up_if: capability와 effort를 높일 조건
-move_down_if: capability와 effort를 낮출 조건
-proof_surface: 선택과 무관하게 필요한 검증
-~~~
+`modelchk` assessment의 여섯 필드는 `recommended_tier`(fast/standard/frontier), `recommended_effort`(glance/measured/thorough/exhaustive), `rationale`, `move_up_if`, `move_down_if`, `proof_surface`다. 선택 정책은 모델 성능의 실험적 증명이 아니다.
 
-executor의 기본 effort 매핑은 Pi에서 minimal/medium/high/max, Claude에서 low/high/xhigh/max 순서다. 실행 가능한 실제 단계와 profile 설정을 확인하며 사용자 pin이 있으면 우선한다. fast와 standard는 등록된 기본 profile을 공유할 수 있다. 이 매핑은 허용된 실행 후보 안에서의 정책이며 벤치마크 결과가 아니다. 선택한 profile·모델·effort와 추천/고정의 이유를 job 근거에 보존한다.
+Fable의 비대화형 호출은 usage credits를 확인창 없이 차감할 수 있어 기본 차단한다. 그 비용까지 허용한 운영 정책이 있을 때만 `allowFableHeadless: true`로 설정한다. 인증·과금 차단은 다른 모델·API key로 자동 우회하지 않는다. [Claude 공식 안내](https://code.claude.com/docs/en/model-config#fable-and-usage-credits)
 
-`routing.allowFableHeadless: true`는 Fable이 usage credits를 사용하는 경우까지 자동 실행하도록 허용하는 값이다. 포함 구독 사용을 확인했다는 의미가 아니다. 기본값 false에서는 Fable headless 실행을 시작하지 않으며 다른 profile로 조용히 우회하지 않는다. Claude Code의 비대화형 `-p`·SDK 경로는 Fable의 해당 청구를 확인 없이 진행할 수 있다. [공식 모델 안내](https://code.claude.com/docs/en/model-config#fable-and-usage-credits)
+## 도구
 
-인증·접근 오류에는 같은 실행의 실패를 기록한다. 다른 모델이나 API key로 바꾸지 않는다. CLI의 요청 모델과 실제 보고된 모델도 구분한다. 외부 런타임이 선택을 바꾸거나 요청 모델을 확인할 수 없다면 지정 모델의 검증 성공으로 기록하지 않는다.
+아래는 **Pi가 호출하는 도구**이며 같은 이름의 셸 명령이나 slash command가 아니다.
 
-## 작업 도구와 수명
-
-| 도구 | 역할 |
+| 도구 | 입력·동작 |
 | --- | --- |
-| `workflow_spawn` | task, cwd, brief, assessment와 선택 profile·skills·label로 자식 작업 제출 |
-| `workflow_jobs` | 현재 Lead의 작업 list/get/wait/cancel, wait는 한 번에 최대 10초 |
-| `workflow_cold_read` | 내용만 전달하는 독립 읽기를 같은 큐에 제출, job ID와 artifactSha256 반환 |
-| `workflow_skills` | 전체 catalog 또는 이름으로 스킬의 호출·역할·적용 조건 조회 |
-| `workflow_prepare` | 기존 pi-herdr 대화형 pane 실행 spec 준비, 기본 위임에는 사용하지 않음 |
+| `workflow_run` | start/list/get/plan/task/freeze/check/recover/integrate/complete |
+| `workflow_spawn` | task, phase, runId, taskId, brief, assessment, 선택 profile·skills·cwd·label |
+| `workflow_jobs` | 현재 세션의 list/get/wait/cancel, wait 최대 10초 |
+| `workflow_cold_read` | artifact 내용만 읽는 독립 job 제출 |
+| `workflow_skills` | catalog 또는 개별 호출 조건 조회 |
+| `workflow_tab` | Herdr 내부에서 workspaceId, cwd, label, role, brief로 새 대화형 보조 탭 |
+| `workflow_prepare` | 기존 pi-herdr 대화형 pane 실행 spec을 만드는 호환 경로 |
 
-`workflow_spawn`의 일반 task는 implement/review/analyze다. probe는 `workflow_cold_read`의 독립 읽기용 routing 단위다. 일반 자식은 브리프, 역할 정책, 선택 스킬과 대상 프로젝트의 지침을 받으며 부모 대화가 자동 복제되지는 않는다. cold read는 실제 산출물 내용만 받고 프로젝트 지침·도구·스킬·확장·이웃 파일 접근을 제외한다. 선택적 lens는 읽을 중립 질문을 지정할 뿐 부모의 선호 결론이나 의도를 넘기는 통로가 아니다.
+일반 `analyze`만 `runId`·phase 없이 실행한다. 구현·승인 리뷰를 요청한다면 반드시 관리되는 run을 사용한다. `workflow_prepare`·`workflow_tab`은 직접 상호작용을 위한 별도 세션이며 그 출력을 관리 run의 승인으로 등록하지 않는다.
 
-두 실행 경로 모두 비동기로 job ID를 반환한다. Lead가 `workflow_jobs get/wait`로 stdout·stderr·최종 상태를 회수한다. `workflow_cold_read`에서는 실제 읽힌 `artifactSha256`와 독립 해석을 함께 비교한다. 원본 파일을 나중에 바꿨다면 이전 해시의 검토를 새 내용에 적용하지 않는다.
+## 계획부터 완료까지
 
-기본값은 동시 2개, 대기 8개, 작업 실행 15분이다. 설정 범위는 동시 1~4개, 대기 0~32개, 실행 시간 1초~1시간이며 작업자가 한도를 임의로 늘리지 않는다. 한도가 차면 새 제출을 거부한다. wait의 10초 경과는 작업 취소가 아니다. cancel·세션 정리는 이 scheduler가 소유한 프로세스만 종료하고 로그를 보존한다. 결과는 `.agent-runs/jobs/<session>/<job>/`의 result.json·stdout.log·stderr.log에서 확인한다. 정확한 경로는 도구 반환값을 따른다. 완료·실패·시간 초과·취소 후 부분 변경도 남을 수 있으므로 재시도 전에 실제 worktree를 확인한다.
+1. Lead는 깨끗한 Git checkout에서 계획·브리프를 준비한다. 산출물을 `.agent-runs/`에 저장한다면 기존 규칙을 보존하며 필요한 ignore만 설정한다. 사용자 변경을 자동 stash/reset하지 않는다.
+2. `workflow_run {action:"start", plan:"<계획 경로>", runId:"<선택 ID>"}`가 현재 HEAD와 계획 SHA-256·스냅샷을 고정한다. 반환된 runId를 보존한다.
+3. `workflow_spawn {task:"review", phase:"plan_review", runId, brief, assessment}`로 Fable 계획 리뷰를 제출하고 `workflow_jobs get/wait`로 회수한다. 이 결과가 검증돼야 구현할 수 있다.
+4. `workflow_run {action:"task", runId, taskId, files:["src/feature.js"], dependsOn:[], brief:"<선택 경로>"}`가 해당 저장소에 독립 detached worktree를 만든다. 파일·디렉터리 경로만 허용하며 glob·상위 경로·저장소 전체는 소유 범위가 될 수 없다.
+5. 첫 실질 브리프를 `workflow_cold_read`로 읽혀 수정한다. `workflow_spawn {task:"implement", phase:"implement", runId, taskId, brief, assessment}`는 승인된 계획·의존 작업을 검사한 뒤 Codex/Sol을 실행한다. cwd를 지정했다면 등록된 worktree와 같아야 한다.
+6. 구현 결과를 회수한다. Lead가 실제 diff를 확인하고 허용된 담당 경로만 커밋한다. `workflow_run {action:"freeze", runId, taskId}`는 깨끗한 HEAD·기준 커밋 ancestry·파일 소유권을 확인해 후보 SHA를 고정한다.
+7. `workflow_run {action:"check", runId, taskId, argv:["npm","test"], timeoutMs:60000}`가 그 후보에서 명령을 직접 실행한다. 문자열 셸 명령이 아닌 argv 배열이다. exit code·출력·후보·계획 해시를 기록하며, 검사가 tracked/untracked 상태나 HEAD를 바꾸면 통과로 기록하지 않는다.
+8. `workflow_spawn {task:"review", phase:"code_review", runId, taskId, brief, assessment}`로 Opus 리뷰를 받고 실제 job 결과를 회수한다. 코드 수정은 같은 task의 새 implement → commit → freeze → check → review로 진행한다.
+9. 모든 작업이 승인되면 `workflow_run {action:"integrate", runId}`가 별도 통합 worktree에 승인된 후보를 합친다. 원래 사용자 브랜치를 이동하지 않는다.
+10. **taskId 없이** `check`로 통합 후보를 검증하고, **taskId 없이** `task:"review", phase:"code_review"`를 제출해 Opus의 최종 통합 리뷰를 받는다. `complete`는 이 검사와 최종 승인을 요구한다.
+11. 완료한 통합 candidate를 반환한다. Lead가 사용자 권한 범위에서 해당 후보를 반영·push·PR 처리하고 실사용 근거와 `re0-memo`를 남긴다.
 
-프로세스 `completed`는 품질 승인 상태가 아니다. Lead가 결과와 고정 후보·테스트·리뷰 근거를 대조한다. 승인 순서나 자동 재개까지 구현된 상태 머신으로 해석하지 않는다. 새 세션은 기존 기록을 읽고 실제 Git 상태를 확인한 뒤 필요한 다음 작업을 제출한다.
+위 JSON 조각은 도구별 핵심 필드다. spawn에는 실제 assessment 여섯 필드가 모두 필요하다. runId/taskId는 선행 도구가 반환한 값을 사용한다. start 시점의 사용자 checkout HEAD가 바뀌면 새로운 기준에서 run을 시작해야 한다. 커밋을 금지한 작업에서는 현재 commit-SHA 기반 관리 실행을 강행하지 않고 분석과 대체 검토 범위를 명시한다.
+
+## 리뷰와 증거
+
+관리 리뷰의 마지막 응답은 다음 형태의 **단일 JSON 객체**다. Claude에는 `--json-schema`도 전달한다. 해시는 실행기가 고정한 실제 값이어야 한다.
+
+```json
+{
+  "phase": "plan_review",
+  "planSha256": "<64자리 SHA-256>",
+  "baseSha": null,
+  "candidateSha": null,
+  "verdict": "approve",
+  "findings": []
+}
+```
+
+코드·통합 리뷰는 phase `code_review`, 같은 계획 SHA-256, 실제 base/candidate Git SHA를 모두 갖는다. findings 항목은 `{ "severity": "blocking" | "non_blocking", "message": "근거·위치·영향·수정 제안" }`이다. blocking 결함이 있으면 approve할 수 없다. Markdown 울타리, 일부 JSON만 추출 가능한 응답, 누락·추가 필드, 다른 해시의 응답을 승인으로 쓰지 않는다.
+
+실제 job ID·요청 runtime/model·보고된 모델·오류·permission denial을 함께 검사한다. 보고된 모델이 없으면 모델 검증 성공으로 표시하지 않으며 관리 리뷰를 승인하지 않는다. 라이브러리의 저수준 `interpretJob`은 process status를 보존하고 `runtimeError`, `modelVerified`, `reviewResultError`를 별도로 반환한다. 영속 승인 전이는 controller가 이 결과를 회수할 때 일어난다.
+
+계획 수정은 `action:"plan"`으로 새 스냅샷과 리뷰를 받는다. 기존 계획·후보 승인은 새 해시에 적용되지 않는다. 동일 후보의 검사 명령별 최신 기록에 실패가 남으면 통과시킬 수 없다. 같은 후보에서 실패한 명령을 고쳐 다시 실행하면 새 결과로 대체된다.
+
+코드는 검사 명령의 실행·상태 일치를 강제한다. 검사가 요구사항을 충분히 검증하는지는 계획·리뷰와 `mandela`·실사용 QA에서 판단한다. 도구를 통한 통제는 에이전트의 모든 OS 접근을 차단하는 sandbox를 뜻하지 않는다.
+
+## 작업 소유권·복구·기록
+
+하나의 controller가 Git common directory의 `paperthin/workflows/state.json`과 lease를 소유한다. 이 위치의 run별 plans/worktrees에 스냅샷·작업/통합 worktree를 보존한다. 저장소와 상태의 실제 경로를 대조하며, 살아 있는 다른 controller의 상태를 가져오지 않는다.
+
+worktree를 만들기 전에 원장에 경로와 기준 SHA를 기록한다. 생성 중 중단되면 명시적 recover가 등록된 저장소·경로·기준 SHA와 깨끗한 상태를 확인해 생성을 마무리한다. 내용이나 기준이 달라졌으면 보존한 채 차단한다. controller 인계 기록도 소유자 정보와 함께 저장하며, 죽은 소유자의 기록만 따라가 인계를 재시도한다.
+
+의존 관계 없는 작업은 파일 소유 범위가 겹치지 않아야 한다. 겹치는 변경은 기존 작업을 명시적으로 dependsOn에 넣어 순서화한다. 의존 작업의 승인된 후보를 새 작업 시작 전에 합치며, 이후 의존 후보가 바뀌면 계속 진행하지 않는다. 후보 freeze·review·통합에서도 실제 변경 경로와 ancestry를 검사한다.
+
+프로세스는 기본 동시 2개·대기 8개·15분이다. 설정 한도는 동시 1~4, 대기 0~32, timeout 1초~1시간이다. 정상 종료·취소 때도 소유한 프로세스 그룹을 정리하며, stderr/stdout/result.json은 보존한다. 개발 서버를 job 자식으로 띄워 지속 실행을 기대하지 않는다.
+
+후보 검사는 별도 한도로 동시 2개, 각 최대 60초다. 비동기로 실행해 다른 job의 시간 제한·취소를 유지하며 검사 중인 후보와 계획 변경을 차단한다. stdout·stderr 합계는 검사당 8 MiB까지 저장하고 응답에는 각 출력의 마지막 12,000바이트를 담는다. 세션 종료는 진행 중 검사를 취소하고 프로세스 정리·결과 저장이 끝난 뒤 원장 소유권을 반납한다.
+
+실행 실패·timeout·세션 중단은 해당 작업을 blocked로 남긴다. 로그·실제 프로세스·부분 변경을 확인한 다음 `workflow_run {action:"recover",runId,taskId,reason:"확인한 상태와 다음 시도 이유"}`로 복구를 기록한다. 계획 리뷰·통합 실패는 taskId를 생략한다. 복구는 프로세스를 재시작하거나 파일을 되돌리지 않는다. 작업·단계·계획 revision별 최대 시도는 기본 3회이며 자동 retry는 없다.
+
+일반 리뷰의 `changes_requested`는 수정 작업으로 돌아가는 판정이며 실행 실패와 구분한다. merge conflict는 실제 작업 트리에서 명시적으로 해결하고 커밋한 뒤 복구한다. 통합 결과는 검사와 최종 리뷰를 다시 거친다. worktree를 자동 삭제하지 않는다.
+
+`/workflow metrics`는 현재 세션의 보고된 실행시간과 `inputTokens`, `outputTokens`, `cachedInputTokens`, `totalTokens`, `costUsd`를 단계/profile별로 합산한다. 미보고 수치는 null과 unknownJobs로 남긴다. 가격표에서 추정한 금액을 실청구로 표시하지 않는다.
 
 ## 스킬 선택
 
@@ -92,16 +134,12 @@ executor의 기본 effort 매핑은 Pi에서 minimal/medium/high/max, Claude에�
 
 유지보수용 스킬은 적용 대상을 먼저 확인한다. `re0-plan`은 upstream의 paperthin-only iteration 관례이며 일반 계획 작성의 필수 단계가 아니다. `re0-upgrade`는 별도 npx skills 설치를 다루며 이 Pi 패키지는 `pi update`로 갱신한다. `re0-release`·`re0-merge`는 upstream의 카탈로그·태그·CI·기여 처리 관례를 가정하므로 대상의 실제 정책과 권한이 맞을 때만 적용한다. 이 패키지가 npx 목록에 없다는 이유로 중복 설치하거나 hook·GitHub star를 추가하지 않는다.
 
-## 리뷰와 증거
-
-계획·브리프와 코드·문서 산출물은 필요한 정리 → 독립 읽기·수정 → 해시 고정 → 해당 리뷰 순서로 준비한다. 계획 리뷰는 계획 SHA-256을, 코드 리뷰는 실제 base/candidate SHA를 확인한다. 일반 analyze 작업은 고정 후보가 없어도 현재 상태와 확인한 파일·시점을 밝히며 분석할 수 있다. 고정·승인 뒤 내용을 수정하면 새 해시로 영향받는 리뷰를 다시 받는다.
-
-각 역할은 적용 스킬·대상·해시·실제 근거와 미적용·실패 이유를 기존 작업 기록·응답에 남긴다. 본문 전달이나 모델의 “실행했다”는 말만으로 완료를 인정하지 않는다. mock 검증, 실제 프로세스 호출, 실제 모델 응답, 대상 프로젝트의 전체 운영 결과를 나눠 기록한다. 모든 Worker는 담당 범위 안에서만 쓰고 Reviewer·Escalation은 분석 결과를 반환하며 파일을 수정하지 않는다.
-
 ## Herdr 화면과 호환 경로
 
-권장 화면은 프로젝트 workspace 안에 Lead tab 하나를 두는 구성이다. tab은 터미널을 묶는 UI 단위이고 pane은 그 안의 분할이다. 기본 headless 자식은 둘 다 만들지 않는다. 터미널 입력, 사용자의 직접 디버깅, 장기 대화가 필요한 작업만 별도 task tab에서 운영한다. [Herdr 개념](https://herdr.dev/docs/concepts/)
+프로젝트 workspace에 Pi/Astra Lead tab을 두고 기본 job은 headless로 실행한다. Herdr의 working/idle은 운영 신호이며 개별 run의 완료·승인 근거가 아니다.
 
-현재 확장은 task tab 자동 생성·배치 어댑터를 제공하지 않는다. 필요할 때 Herdr UI로 대상 workspace의 새 tab을 열고 그 tab의 터미널에서 프로젝트 경로와 명시한 런타임을 시작한다. 기존 job을 새 tab으로 자동 이전하거나 동일 프로세스를 이어받는 기능으로 설명하지 않는다. 설치된 Herdr 0.9의 `herdr tab create --help`는 `--workspace`, `--cwd`, `--label`, `--focus`·`--no-focus`를 제공한다. CLI로 수동 생성할 때도 목적 workspace ID와 경로를 명시하고 현재 설치의 도움말을 확인한다.
+`workflow_tab`은 `HERDR_ENV=1`과 현재 workspace/tab/pane 식별자가 있는 Herdr 내부에서만 동작한다. 명시한 workspace와 절대 cwd에 `tab create --no-focus`로 새 탭을 만들고, 응답에서 확인한 새 pane ID에만 CLI를 시작·프롬프트를 전달한다. 셸 문자열을 조합하지 않고 argv를 전달한다. 실패하면 생성된 탭을 보존하고 관찰된 식별자를 반환한다. 전송 결과가 불확실하면 자동 재전송하지 않는다.
 
-pi-herdr 0.5의 생성은 `tabId`를 통한 목적 tab 배치를 보장하지 않으며 `split --current`를 사용한다. 탭 이동만으로 이 제약이 해결됐다고 광고하지 않는다. `workflow_prepare`는 기존 대화형 pane 위임의 spec만 준비한다. 해당 경로를 사용할 때만 기존 pi-herdr 도구를 사용하고, Herdr 밖에서 현재 사용자의 pane을 조회·제어하지 않는다.
+이 도구는 직접 디버깅·질문을 위한 새 대화형 보조 세션이다. 기존 headless job 이전·자동 승인·별도 scheduler는 제공하지 않는다. 역할의 기본 interactive launch 인자를 사용하며, Fable의 실제 상호작용·비용 확인은 CLI가 처리한다.
+
+`workflow_prepare`는 기존 pi-herdr의 현재 pane 분할 경로를 위한 spec 준비다. 새 task-tab 어댑터와 구분하며, pi-herdr의 `split --current`를 특정 tab 배치로 간주하지 않는다. Herdr 밖에서 현재 사용자의 pane을 조회·제어하지 않는다.

@@ -38,19 +38,28 @@ flowchart TD
 
 | 항목 | 참조 킷 | Pi Paperthin Orchestration |
 | --- | --- | --- |
-| 계획과 조율 | 별도 Planner·Orchestrator | Lead/Astra가 함께 담당 |
-| 구현 | Pi Coder | 작업별 sol/fable/codex profile |
-| 검토·분석 | Pi Reviewer | opus/fable profile, 수정 없는 결과 반환 |
-| 기본 위임 | Herdr의 에이전트 pane | pane 없는 독립 headless 프로세스 |
-| 프로세스 관리 | 킷 자체 agent 도구·상태 | Lead가 소유한 bounded queue·취소·보존된 출력 |
+| 계획과 조율 | 별도 Planner·Orchestrator | Pi/Astra Lead가 함께 담당 |
+| 계획 리뷰 | Pi Reviewer | 기본 Claude/Fable, `plan_review` |
+| 구현 | Pi Coder | 기본 Codex/Sol, `implement`; Pi/Sol 선택 가능 |
+| 코드 리뷰 | Pi Reviewer | 기본 Claude/Opus, 작업·통합 `code_review` |
+| 기본 위임 | Herdr의 에이전트 pane | 화면 없는 독립 프로세스·bounded queue |
+| 승인 관리 | 역할 지침과 작업 기록 | 영속 원장·실제 job·모델·계획/후보 해시 대조 |
+| 변경 격리 | 단계별 작업 절차 | 등록 worktree·담당 경로·의존성·별도 통합 후보 |
+| 직접 대화 | Herdr 에이전트 도구 | 선택적 `workflow_tab`으로 새 탭·새 세션 |
 | 시작 | pi-orchestrator와 프롬프트 | 일반 Pi에서 `/lead <요청>` |
 | Paperthin | 킷 역할 지침과 선택 스킬 | 28개 catalog, 역할 핵심·선택 본문, invocation 구분 |
 | 프로젝트 설정 | 킷 생성 설정 | 대상 `.pi/paperthin.json`의 roles·routing·jobs |
 
-현재 흐름은 Lead의 요청 해석·작업 규모 평가 → 계획 정리·해시 고정·계획 리뷰 → 첫 Worker 브리프의 독립 읽기 → 구현 → 필요한 sip 검사·수정 → 후보 고정·코드 리뷰 → 통합·학습이다. `modelchk`는 중립 추천을 만들고 executor가 허용된 profile과 실제 effort를 선택한다. 사용자 pin이 우선하며 인증·접근 실패를 자동 fallback으로 감추지 않는다.
+현재 흐름은 요청 해석·계획 정리 → 고정 계획의 Fable 리뷰 → 첫 Worker 브리프의 독립 읽기 → Codex/Sol 구현 → Lead 커밋·후보 고정·실제 검사 → Opus 작업 리뷰 → 별도 worktree 통합·검사·Opus 최종 리뷰 → 완료·학습이다. [전체 구조도](architecture.md)
 
-Lead만 `workflow_spawn`·`workflow_jobs`를 사용해 작업을 배정하고 회수한다. 기본 동시 실행은 2개, 대기는 8개, 작업 실행 제한은 15분이다. `workflow_cold_read`도 같은 queue에서 내용만 읽고 해시·독립 해석을 돌려준다. `sip`·`re0-loop` 등은 Lead의 기존 반복에 통합하며 자식이 별도 scheduler를 만들지 않는다. 상세 계약은 [orchestration.md](orchestration.md)를 따른다.
+`workflow_run`은 계획 스냅샷, 등록 worktree, 작업별 소유 경로·의존성, 후보와 검사를 관리한다. 구현·리뷰의 `workflow_spawn`에는 runId와 phase가 필요하며 실제 job 결과를 `workflow_jobs`로 회수해 승인 원장을 갱신한다. 현재 계획·후보의 선행 조건이 맞아야 다음 단계로 진행한다. 일반 `analyze`와 직접 대화 탭은 승인 경로와 별개다.
 
-Herdr는 프로젝트 workspace와 Lead tab의 화면 구성에 사용한다. 상호작용이 필요한 작업만 수동 task tab으로 운영한다. 기존 `workflow_prepare`·pi-herdr pane 위임은 호환 경로이며 현재 pi-herdr 0.5의 `split --current` 동작을 task tab 자동 배치로 해석하지 않는다. 패키지에는 task tab 자동 어댑터가 없다.
+`modelchk`는 중립 추천을 만들고 executor가 사용자 pin·명시 profile·단계 기본값과 실제 effort를 적용한다. Fable headless의 usage credits는 기본 허용하지 않으며, 사용자 정책의 명시적 설정을 요구한다. 인증·접근 실패를 다른 모델이나 API 결제로 자동 우회하지 않는다.
 
-scheduler의 완료는 프로세스 종료이며 품질 승인과 다르다. 계획·코드 리뷰 순서와 Paperthin 적용은 여전히 Lead의 판단과 근거 확인이 필요하다. 코드가 승인 전이를 모두 강제하거나 새 세션에서 프로세스를 자동 재개하는 구조는 아니다. 실제 후보 SHA·diff·테스트·외부 근거를 확인하며, 고정·승인 뒤 바뀐 대상은 새 해시로 영향받는 리뷰를 다시 받는다.
+Lead만 전체 작업을 조율한다. 기본 한도는 동시 2개·대기 8개·job당 15분이며 `workflow_cold_read`도 같은 큐에서 내용만 독립 읽는다. `sip`·`re0-loop`는 기존 반복에 통합하고 자식은 scheduler를 만들지 않는다. [상세 실행 계약](orchestration.md)
+
+Herdr는 프로젝트 workspace와 Lead tab을 제공한다. 직접 상호작용이 필요하면 Herdr 내부의 `workflow_tab`이 명시한 workspace에 새 탭을 만들고 Pi·Codex·Claude의 별도 대화형 세션을 시작한다. 기존 headless job의 재개·이전이나 승인 등록 기능은 아니다. 기존 `workflow_prepare`·pi-herdr pane 위임은 호환 경로로 유지하며 현재 pane 분할을 task tab 생성으로 해석하지 않는다.
+
+원장은 Git common directory에 보존하고 한 controller가 소유한다. 재시작 후에는 이전 기록·로그·부분 worktree를 확인하고 blocked 작업을 명시적으로 복구한다. 프로세스를 자동 재접속·재시작하거나 사용자 checkout을 덮어쓰지 않는다. 완료한 후보를 사용자 브랜치에 반영·push·PR 처리할 권한은 실제 사용자 요청에서 확인한다.
+
+코드는 승인 대상과 실제 실행·검사 기록의 일치를 강제한다. 요구사항을 충분히 검증했는지와 리뷰 판단이 타당한지는 여전히 Lead와 Reviewer의 책임이다. Paperthin 본문 주입이나 프로세스 정상 종료는 그 증거를 대신하지 않는다. [운영·복구](../RUNBOOK.md) · [검증 범위](verification.md)

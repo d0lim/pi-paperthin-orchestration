@@ -2,7 +2,12 @@
   "routing": {
     "mode": "adaptive",
     "allowFableHeadless": false,
-    "pins": {}
+    "pins": {},
+    "phases": {
+      "plan_review": "fable",
+      "implement": "codex",
+      "code_review": "opus"
+    }
   },
   "jobs": {
     "maxConcurrent": 2,
