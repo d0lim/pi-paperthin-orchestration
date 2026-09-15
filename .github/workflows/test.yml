@@ -1,0 +1,22 @@
+name: Tests
+on:
+  push:
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Install isolated Pi SDK for loader tests
+        run: npm install --prefix "$RUNNER_TEMP/pi-sdk" --no-save --no-package-lock @earendil-works/pi-coding-agent@0.85.1 typebox
+      - name: Test runtime and installed extension contract
+        run: npm test
+        env:
+          PI_PACKAGE_DIR: ${{ runner.temp }}/pi-sdk/node_modules/@earendil-works/pi-coding-agent
+      - name: Verify package contents
+        run: npm pack --dry-run --json --ignore-scripts

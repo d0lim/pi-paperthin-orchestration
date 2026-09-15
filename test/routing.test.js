@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
@@ -100,6 +101,50 @@ test('adaptive routing uses task defaults and maps frontier work to the correct 
     assert.equal(selected.requiresBillingAuthorization, true);
   }
   assert.throws(() => route(dir, { task: 'deploy' }), /작업/);
+});
+
+test('workflow phases select their configured runtime profile independently of tier', t => {
+  const { dir } = fixture(t);
+  for (const tier of ['fast', 'standard', 'frontier']) {
+    for (const [phase, task, profile, runtime] of [
+      ['plan_review', 'review', 'fable', 'claude'],
+      ['implement', 'implement', 'codex', 'codex'],
+      ['code_review', 'review', 'opus', 'claude'],
+    ]) {
+      const selected = route(dir, { task, phase, assessment: assessment({ recommended_tier: tier }) });
+      assert.equal(selected.phase, phase);
+      assert.equal(selected.profile, profile);
+      assert.equal(selected.runtime, runtime);
+      assert.equal(selected.selection, 'phase-default');
+      assert.equal(selected.requiresBillingAuthorization, profile === 'fable');
+    }
+  }
+  for (const options of [{ task: 'implement', phase: 'plan_review' }, { task: 'review', phase: 'implement' },
+    { task: 'probe', phase: 'code_review' }, { phase: 'deploy' }, { phase: null }]) {
+    assert.throws(() => route(dir, options), /phase/);
+  }
+});
+
+test('phase defaults merge by phase while explicit profiles and effort pins retain priority', t => {
+  const { dir, personal } = fixture(t);
+  writeFileSync(personal, JSON.stringify({ routing: { phases: { implement: 'sol', plan_review: 'opus' } } }));
+  configure(dir, { routing: { phases: { implement: 'codex' } }, roles: { 'codex-worker': { effort: 'low' } } });
+  assert.deepEqual(readWorkflowSettings(dir).routing.phases, { plan_review: 'opus', implement: 'codex', code_review: 'opus' });
+  const selected = route(dir, { phase: 'implement', assessment: assessment({ recommended_effort: 'exhaustive' }) });
+  assert.equal(selected.effort, 'low');
+  assert.equal(selected.effortSelection, 'configured');
+  assert.equal(route(dir, { phase: 'implement', profile: 'sol' }).profile, 'sol');
+  configure(dir, { routing: { pins: { implement: 'sol' } } });
+  assert.equal(route(dir, { phase: 'implement' }).selection, 'user-pin');
+  assert.throws(() => route(dir, { phase: 'implement', profile: 'codex' }), /고정/);
+});
+
+test('phase configuration rejects unknown phases and profiles for another task', t => {
+  const { dir } = fixture(t);
+  for (const phases of [null, [], { deploy: 'codex' }, { plan_review: 'codex' }, { code_review: 'sol' }, { implement: 'opus' }, { implement: { profile: 'codex' } }]) {
+    configure(dir, { routing: { phases } });
+    assert.throws(() => readWorkflowSettings(dir), /phase/);
+  }
 });
 
 test('neutral effort maps independently of tier onto each selected runtime ladder', t => {
@@ -502,4 +547,177 @@ test('malformed runtime JSON never becomes a clean completion and stdout artifac
   assert.equal(interpreted.runtimeError, false);
   const running = { status: 'running', output: '{incomplete', metadata: { route: { runtime: 'pi', model: 'fixture-model' } } };
   assert.equal(interpretJob(running), running);
+});
+
+function reviewTarget(phase = 'code_review') {
+  return { planSha256: 'a'.repeat(64), baseSha: phase === 'plan_review' ? null : 'b'.repeat(40), candidateSha: phase === 'plan_review' ? null : 'c'.repeat(40) };
+}
+
+function reviewResult(phase = 'code_review', overrides = {}) {
+  return { phase, ...reviewTarget(phase), verdict: 'approve', findings: [], ...overrides };
+}
+
+function reviewJob(result, { phase = 'code_review', target = reviewTarget(phase), envelope = {} } = {}) {
+  return completed('claude', 'claude-opus-5', {
+    result: typeof result === 'string' ? result : JSON.stringify(result), modelUsage: { 'claude-opus-5': {} }, ...envelope,
+  }, { route: { task: 'review', phase, runtime: 'claude', model: 'claude-opus-5' }, reviewTarget: target });
+}
+
+test('managed phase reviews require exact immutable targets and native JSON schema output', t => {
+  const { dir, brief } = fixture(t);
+  configure(dir, { routing: { allowFableHeadless: true } });
+  for (const phase of ['plan_review', 'code_review']) {
+    const target = reviewTarget(phase);
+    const launch = managed(dir, brief, { task: 'review', phase, reviewTarget: target });
+    assert.deepEqual(launch.reviewTarget, target);
+    assert.notEqual(launch.reviewTarget, target);
+    assert.ok(launch.prompt.includes(JSON.stringify(target)));
+    const schema = JSON.parse(valueAfter(launch.args, '--json-schema'));
+    assert.equal(schema.additionalProperties, false);
+    assert.deepEqual(schema.required, ['phase', 'planSha256', 'baseSha', 'candidateSha', 'verdict', 'findings']);
+    assert.deepEqual(schema.properties.phase.enum, [phase]);
+    assert.deepEqual(schema.properties.planSha256.enum, [target.planSha256]);
+    assert.equal(launch.args.at(-1), launch.prompt);
+    assert.throws(() => managed(dir, brief, { task: 'review', phase }), /reviewTarget/);
+  }
+  const target = reviewTarget();
+  for (const invalid of [null, {}, { ...target, planSha256: null }, { ...target, baseSha: 'main' },
+    { ...target, candidateSha: 'c'.repeat(39) }, { ...target, extra: true }]) {
+    assert.throws(() => managed(dir, brief, { task: 'review', phase: 'code_review', reviewTarget: invalid }), /reviewTarget/);
+  }
+  assert.throws(() => managed(dir, brief, { task: 'review', phase: 'plan_review', reviewTarget: target }), /reviewTarget/);
+  assert.throws(() => managed(dir, brief, { phase: 'implement', reviewTarget: target }), /reviewTarget/);
+  const legacy = managed(dir, brief, { task: 'review' });
+  assert.equal(legacy.args.includes('--json-schema'), false);
+});
+
+test('review parsing binds the exact phase, plan and candidate without treating free text as approval', () => {
+  const valid = interpretJob(reviewJob(reviewResult()));
+  assert.deepEqual(valid.reviewResult, reviewResult());
+  assert.equal(valid.reviewResultError, null);
+  assert.equal(valid.runtimeError, false);
+  const changes = reviewResult('code_review', { verdict: 'changes_requested', findings: [{ severity: 'blocking', message: 'Missing regression check.' }] });
+  assert.deepEqual(interpretJob(reviewJob(changes)).reviewResult, changes);
+  const plan = reviewResult('plan_review');
+  assert.deepEqual(interpretJob(reviewJob(plan, { phase: 'plan_review' })).reviewResult, plan);
+  const invalid = ['APPROVED', 'Before ' + JSON.stringify(reviewResult()), '```json\n' + JSON.stringify(reviewResult()) + '\n```',
+    reviewResult('plan_review'), reviewResult('code_review', { planSha256: 'd'.repeat(64) }),
+    reviewResult('code_review', { baseSha: 'd'.repeat(40) }), reviewResult('code_review', { candidateSha: 'd'.repeat(40) }),
+    reviewResult('code_review', { unexpected: true }), reviewResult('code_review', { verdict: 'approved' }),
+    reviewResult('code_review', { findings: [{ severity: 'blocking', message: 'A bug.' }] }),
+    reviewResult('code_review', { findings: [{ severity: 'minor', message: 'A note.' }] }),
+    reviewResult('code_review', { findings: [{ severity: 'non_blocking', message: ' ' }] }),
+    reviewResult('code_review', { findings: [{ severity: 'non_blocking', message: 'A note.', extra: true }] }),
+    reviewResult('code_review', { findings: {} })];
+  for (const result of invalid) {
+    const parsed = interpretJob(reviewJob(result));
+    assert.equal(parsed.reviewResult, null, JSON.stringify(result));
+    assert.equal(typeof parsed.reviewResultError, 'string');
+    assert.equal(parsed.runtimeError, false, 'schema errors are distinct from CLI failure');
+    assert.equal(parsed.modelVerified, true);
+  }
+  assert.equal(interpretJob(reviewJob(reviewResult(), { target: undefined })).reviewResultError, null);
+  assert.ok(interpretJob(reviewJob(reviewResult(), { target: null })).reviewResultError);
+});
+
+test('native structured output is parsed while runtime failures and model mismatches stay distinct', () => {
+  const native = interpretJob(reviewJob('', { envelope: { structured_output: reviewResult() } }));
+  assert.deepEqual(native.reviewResult, reviewResult());
+  assert.equal(native.runtimeError, false);
+  const runtimeFailed = interpretJob(reviewJob(reviewResult(), { envelope: { is_error: true } }));
+  assert.equal(runtimeFailed.runtimeError, true);
+  assert.deepEqual(runtimeFailed.reviewResult, reviewResult());
+  const modelFailed = interpretJob(reviewJob(reviewResult(), { envelope: { modelUsage: { 'claude-fable-5-1': {} } } }));
+  assert.equal(modelFailed.modelVerified, false);
+  assert.equal(modelFailed.reviewResultError, null);
+  const legacy = interpretJob(completed('claude', 'claude-opus-5', { result: 'Review finished.' }));
+  assert.equal(legacy.reviewResult, null);
+  assert.equal(legacy.reviewResultError, null);
+});
+
+test('usage extracts reported token totals and USD without inventing unavailable costs', () => {
+  const claude = interpretJob(completed('claude', 'claude-opus-5', {
+    result: 'Done', usage: { input_tokens: 10, output_tokens: 20, cache_read_input_tokens: 30, cache_creation_input_tokens: 5 }, total_cost_usd: 0.123,
+  }));
+  assert.deepEqual(claude.usage, { inputTokens: 45, outputTokens: 20, cachedInputTokens: 30, totalTokens: 65, costUsd: 0.123 });
+  const events = [{ type: 'item.completed', item: { type: 'agent_message', text: 'Done' } },
+    { type: 'turn.completed', usage: { input_tokens: 10, output_tokens: 20, cached_input_tokens: 5 } },
+    { type: 'turn.completed', usage: { input_tokens: 4, output_tokens: 6, cached_input_tokens: 0 } }];
+  const codex = interpretJob(completed('codex', 'gpt-5.6-sol', events.map(event => JSON.stringify(event)).join('\n')));
+  assert.deepEqual(codex.usage, { inputTokens: 14, outputTokens: 26, cachedInputTokens: 5, totalTokens: 40, costUsd: null });
+  const pi = interpretJob(completed('pi', 'gpt-5.6-sol', JSON.stringify({ type: 'message_end', message: {
+    role: 'assistant', content: [{ type: 'text', text: 'Done' }],
+    usage: { input: 10, output: 20, cacheRead: 30, cacheWrite: 5, totalTokens: 65, cost: { total: 0.5 } },
+  } })));
+  assert.deepEqual(pi.usage, { inputTokens: 45, outputTokens: 20, cachedInputTokens: 30, totalTokens: 65, costUsd: 0.5 });
+  const missing = interpretJob(completed('claude', 'claude-opus-5', { result: 'Done' }));
+  assert.deepEqual(missing.usage, { inputTokens: null, outputTokens: null, cachedInputTokens: null, totalTokens: null, costUsd: null });
+  const invalid = interpretJob(completed('claude', 'claude-opus-5', { result: 'Done', usage: { input_tokens: -1, output_tokens: '4' }, total_cost_usd: -1 }));
+  assert.deepEqual(invalid.usage, missing.usage);
+});
+
+test('managed launches bind routing and argv to one configuration read', t => {
+  const { dir, brief, personal } = fixture(t);
+  configure(dir, {});
+  // Each case runs in an isolated process: replacing the config after its first read
+  // models an atomic edit without patching builtins used by other test files.
+  const script = `
+    import assert from 'node:assert/strict';
+    import fs from 'node:fs';
+    import { syncBuiltinESMExports } from 'node:module';
+    const { buildManagedLaunch } = await import(process.argv[1]);
+    const input = JSON.parse(process.argv[2]);
+    const original = fs.readFileSync;
+    let reads = 0;
+    fs.readFileSync = function(file, ...args) {
+      const result = original.call(this, file, ...args);
+      if (file === input.configPath) {
+        reads++;
+        if (reads === 1) fs.writeFileSync(file, JSON.stringify(input.changed));
+      }
+      return result;
+    };
+    syncBuiltinESMExports();
+    let launch;
+    try { launch = buildManagedLaunch(input.options); }
+    finally { fs.readFileSync = original; syncBuiltinESMExports(); }
+    assert.equal(reads, 1);
+    const flag = name => launch.args[launch.args.indexOf(name) + 1];
+    assert.equal(flag('--model'), launch.route.model);
+    assert.equal(flag(launch.runtime === 'pi' ? '--thinking' : '--effort'), launch.route.effort);
+    if (launch.runtime === 'pi') assert.equal(flag('--provider'), launch.route.provider);
+    assert.equal(launch.route.requiresBillingAuthorization, false);
+    if (launch.runtime === 'claude') {
+      assert.equal(launch.route.model, 'claude-opus-5');
+      assert.match(flag('--append-system-prompt'), /설정된 모델: claude-opus-5;/);
+      assert.throws(() => buildManagedLaunch(input.options), /Fable/);
+    }
+    process.stdout.write(JSON.stringify({ reads, runtime: launch.runtime }));
+  `;
+  const configPath = realpathSync(path.join(dir, '.pi/paperthin.json'));
+  const defaults = { cwd: dir, configCwd: dir, assessment: assessment() };
+  const cases = [
+    { options: { ...defaults, task: 'review', phase: 'code_review', brief,
+      reviewTarget: { planSha256: 'a'.repeat(64), baseSha: 'b'.repeat(40), candidateSha: 'c'.repeat(40) } },
+      changed: { roles: { reviewer: { model: 'claude-fable-5-1' } } } },
+    { options: { ...defaults, task: 'implement', phase: 'implement', profile: 'sol', brief },
+      changed: { roles: { worker: { provider: 'other-provider', model: 'gpt-6-astra', effort: 'max' } } } },
+    { options: { ...defaults, task: 'probe', artifact: brief },
+      changed: { roles: { worker: { provider: 'other-provider', model: 'gpt-6-astra', effort: 'max' } } } },
+  ];
+  for (const candidate of cases) {
+    configure(dir, {});
+    const result = JSON.parse(execFileSync(process.execPath, ['--input-type=module', '-e', script,
+      new URL('../lib/routing.mjs', import.meta.url).href, JSON.stringify({ ...candidate, configPath })],
+      { encoding: 'utf8', env: { ...process.env, PAPERTHIN_SETTINGS_PATH: personal } }));
+    assert.equal(result.reads, 1);
+  }
+});
+
+test('caller-supplied settings fields cannot grant Fable authorization', t => {
+  const { dir, brief } = fixture(t);
+  const forged = { ...readWorkflowSettings(dir), routing: { allowFableHeadless: true } };
+  assert.throws(() => managed(dir, brief, { task: 'review', phase: 'plan_review',
+    reviewTarget: { planSha256: 'a'.repeat(64), baseSha: null, candidateSha: null },
+    settings: forged, settingsSnapshot: forged, routing: { allowFableHeadless: true } }), /Fable/);
 });

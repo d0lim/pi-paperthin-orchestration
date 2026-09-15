@@ -4,8 +4,12 @@ import path from 'node:path';
 import type { ExtensionAPI, ExtensionContext } from '@earendil-works/pi-coding-agent';
 import { Type } from 'typebox';
 import { buildLaunch, buildPolicy, herdrSpec, POLICY_MARKER, readSkillCatalog, readWorkflowSettings } from '../lib/runtime.mjs';
-import { buildManagedLaunch, interpretJob } from '../lib/routing.mjs';
+import { buildManagedLaunch } from '../lib/routing.mjs';
 import { JobManager } from '../lib/jobs.mjs';
+import { WorkflowStore } from '../lib/workflow-state.mjs';
+import { submitWorkflowJob, collectWorkflowJob } from '../lib/controller.mjs';
+import { createHerdrTaskTab } from '../lib/herdr.mjs';
+import { summarizeJobs } from '../lib/metrics.mjs';
 
 type Role = 'lead' | 'worker';
 const ENTRY = 'paperthin-workflow';
@@ -17,6 +21,26 @@ export default function workflow(pi: ExtensionAPI, createJobManager = (options) 
   let sessionRole: Role | null = null;
   let activating = false;
   let jobs: JobManager | undefined;
+  const stores = new Map<string, WorkflowStore>();
+  function workflowStore(ctx: ExtensionContext) {
+    const cwd = configCwd(ctx);
+    if (!stores.has(cwd)) stores.set(cwd, new WorkflowStore({ cwd }));
+    return stores.get(cwd)!;
+  }
+  function collect(job, ctx: ExtensionContext) {
+    return collectWorkflowJob(job, job.metadata?.workflow ? workflowStore(ctx) : undefined);
+  }
+  async function dispose(ctx?: ExtensionContext) {
+    if (jobs) {
+      await jobs.dispose();
+      if (ctx) for (const job of jobs.list()) {
+        try { collect(job, ctx); } catch (error) { reportError(error); }
+      }
+      jobs = undefined;
+    }
+    await Promise.all([...stores.values()].map(store => store.close()));
+    stores.clear();
+  }
 
   function jobList() {
     return (jobs?.list() ?? []).map(job => ({ id: job.id, status: job.status, label: job.label, cwd: job.cwd, route: job.metadata?.route, paths: job.paths }));
@@ -101,7 +125,7 @@ export default function workflow(pi: ExtensionAPI, createJobManager = (options) 
   }
 
   pi.on('session_start', async (_event, ctx) => {
-    if (jobs) { await jobs.dispose(); jobs = undefined; }
+    await dispose(ctx);
     sessionRole = null;
     for (const entry of ctx.sessionManager.getBranch()) {
       if (entry.type !== 'custom' || entry.customType !== ENTRY) continue;
@@ -110,9 +134,7 @@ export default function workflow(pi: ExtensionAPI, createJobManager = (options) 
     }
     statusLabel(ctx);
   });
-  pi.on('session_shutdown', async () => {
-    if (jobs) { await jobs.dispose(); jobs = undefined; }
-  });
+  pi.on('session_shutdown', async (_event, ctx) => { await dispose(ctx); });
 
   // Global installation must not change ordinary Pi requests before activation.
   pi.on('input', (_event, ctx) => {
@@ -176,6 +198,8 @@ export default function workflow(pi: ExtensionAPI, createJobManager = (options) 
     handler: async (args, ctx) => {
       try {
         if (args.trim() === 'jobs') return message('workflow-jobs', JSON.stringify(jobList(), null, 2));
+        if (args.trim() === 'metrics') return message('workflow-metrics', JSON.stringify(summarizeJobs((jobs?.list() ?? []).map(job => collect(job, ctx))), null, 2));
+        if (args.trim() === 'runs') { requireLead(); assertConfiguredRole(ctx); return message('workflow-runs', JSON.stringify(workflowStore(ctx).list(), null, 2)); }
         if (args.trim() === 'skills') return message('workflow-skills', JSON.stringify(readSkillCatalog().map(({ name, invocation, when }) => ({ name, invocation, when })), null, 2));
         if (args.trim().startsWith('cancel ')) {
           if (!jobs) throw new Error('현재 세션이 소유한 job이 없습니다.');
@@ -189,7 +213,7 @@ export default function workflow(pi: ExtensionAPI, createJobManager = (options) 
           message('workflow-status', 'Paperthin 역할을 해제했습니다. 현재 모델은 유지되며 일반 Pi 대화를 계속할 수 있습니다.');
           return;
         }
-        if (!['', 'status'].includes(args.trim())) throw new Error('사용법: /workflow, /workflow jobs, /workflow skills, /workflow cancel <id>, /workflow off');
+        if (!['', 'status'].includes(args.trim())) throw new Error('사용법: /workflow, /workflow jobs, /workflow skills, /workflow runs, /workflow metrics, /workflow cancel <id>, /workflow off');
         const role = currentRole();
         const settings = readWorkflowSettings(configCwd(ctx), { projectTrusted: trusted(ctx) });
         const roles = settings.roles;
@@ -250,7 +274,9 @@ export default function workflow(pi: ExtensionAPI, createJobManager = (options) 
     description: 'Lead 전용. modelchk 여섯 필드로 실행 profile·effort를 선택하고 독립 headless 작업을 큐에 넣습니다. 새 pane을 만들지 않으며 결과는 workflow_jobs로 회수합니다.',
     parameters: Type.Object({
       task: Type.Union([Type.Literal('implement'), Type.Literal('review'), Type.Literal('analyze')]),
-      cwd: Type.String({ description: '작업할 checkout/worktree 절대경로' }),
+      cwd: Type.Optional(Type.String({ description: '관리 작업은 실행기가 정한 worktree와 일치해야 함; analyze는 절대경로 필수' })),
+      runId: Type.Optional(Type.String()), taskId: Type.Optional(Type.String()),
+      phase: Type.Optional(Type.Union([Type.Literal('plan_review'), Type.Literal('implement'), Type.Literal('code_review')])),
       brief: Type.String({ description: '작업 브리프 경로. 상대경로는 Lead 프로젝트 기준' }),
       assessment: assessmentSchema,
       profile: Type.Optional(Type.Union([Type.Literal('sol'), Type.Literal('opus'), Type.Literal('fable'), Type.Literal('codex')])),
@@ -259,9 +285,16 @@ export default function workflow(pi: ExtensionAPI, createJobManager = (options) 
     }),
     async execute(_id, params, signal, _onUpdate, ctx) {
       requireLead(); assertConfiguredRole(ctx); signal?.throwIfAborted();
-      if (!path.isAbsolute(params.cwd)) throw new Error('cwd는 worktree 절대경로여야 합니다.');
-      const launch = buildManagedLaunch({ ...params, brief: path.resolve(ctx.cwd, params.brief), configCwd: configCwd(ctx) });
-      const result = submit(launch, ctx, params.label);
+      let result;
+      const resolved = { ...params, brief: path.resolve(ctx.cwd, params.brief) };
+      if (params.task === 'analyze') {
+        if (!params.cwd || !path.isAbsolute(params.cwd)) throw new Error('analyze cwd는 절대경로여야 합니다.');
+        if (params.runId || params.phase || params.taskId) throw new Error('analyze는 승인 작업이 아닙니다. runId/phase/taskId를 지정하지 마세요.');
+        result = submit(buildManagedLaunch({ ...resolved, configCwd: configCwd(ctx) }), ctx, params.label);
+      } else {
+        if (!params.runId || !params.phase) throw new Error('구현·리뷰에는 workflow_run의 runId와 phase가 필요합니다.');
+        result = submitWorkflowJob({ params: resolved, store: workflowStore(ctx), jobs: manager(ctx), configCwd: configCwd(ctx) });
+      }
       return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }], details: result };
     },
   });
@@ -273,15 +306,72 @@ export default function workflow(pi: ExtensionAPI, createJobManager = (options) 
       id: Type.Optional(Type.String()), waitMs: Type.Optional(Type.Number({ minimum: 0, maximum: 10000 })) }),
     async execute(_id, params, signal, _onUpdate, ctx) {
       requireLead(); assertConfiguredRole(ctx); signal?.throwIfAborted();
-      if (params.action === 'list') return { content: [{ type: 'text', text: JSON.stringify(jobList(), null, 2) }], details: { jobs: jobList() } };
+      if (params.action === 'list') {
+        const results = (jobs?.list() ?? []).map(job => collect(job, ctx));
+        return { content: [{ type: 'text', text: JSON.stringify(results, null, 2) }], details: { jobs: results } };
+      }
       if (!jobs || !params.id) throw new Error('현재 세션이 소유한 job id가 필요합니다.');
       let job;
       if (params.action === 'cancel') job = jobs.cancel(params.id);
       else if (params.action === 'wait') job = await jobs.wait(params.id, { timeoutMs: params.waitMs ?? 10000, signal });
       else if (params.action === 'get') job = jobs.get(params.id);
       else throw new Error('지원하지 않는 job 동작입니다.');
-      const result = interpretJob(job);
+      const result = collect(job, ctx);
       return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }], details: result };
+    },
+  });
+
+  pi.registerTool({
+    name: 'workflow_run', label: 'Gated workflow state',
+    description: '계획 승인·worktree·후보·검증·통합을 관리합니다. check는 argv를 직접 실행해 근거를 남깁니다. complete는 통합 후보 검사와 최종 코드 리뷰 승인을 요구합니다. 리뷰 판정은 workflow_jobs에서만 회수합니다.',
+    parameters: Type.Object({
+      action: Type.Union(['start','list','get','plan','task','freeze','check','recover','integrate','complete'].map(value => Type.Literal(value))),
+      runId: Type.Optional(Type.String()), plan: Type.Optional(Type.String()),
+      taskId: Type.Optional(Type.String()), files: Type.Optional(Type.Array(Type.String())),
+      dependsOn: Type.Optional(Type.Array(Type.String())), brief: Type.Optional(Type.String()),
+      argv: Type.Optional(Type.Array(Type.String())), timeoutMs: Type.Optional(Type.Number({ minimum: 1, maximum: 60000 })),
+      phase: Type.Optional(Type.String()), reason: Type.Optional(Type.String()),
+    }),
+    async execute(_id, params, signal, _onUpdate, ctx) {
+      requireLead(); assertConfiguredRole(ctx); signal?.throwIfAborted();
+      const store = workflowStore(ctx);
+      let result;
+      const planPath = params.plan ? path.resolve(ctx.cwd, params.plan) : undefined;
+      if (params.action === 'list') result = store.list();
+      else if (params.action === 'start') result = store.start({ runId: params.runId, planPath });
+      else {
+        if (!params.runId) throw new Error('runId가 필요합니다.');
+        if (params.action === 'get') result = store.get(params.runId);
+        else if (params.action === 'plan') result = store.snapshotPlan(params.runId, { planPath });
+        else if (params.action === 'task') result = store.addTask(params.runId, { taskId: params.taskId, files: params.files, dependsOn: params.dependsOn, briefPath: params.brief ? path.resolve(ctx.cwd, params.brief) : undefined });
+        else if (params.action === 'freeze') result = store.freezeTask(params.runId, params.taskId);
+        else if (params.action === 'check') result = await store.recordChecks(params.runId, { taskId: params.taskId, argv: params.argv, timeoutMs: params.timeoutMs, signal });
+        else if (params.action === 'recover') result = store.recoverTask(params.runId, { taskId: params.taskId, phase: params.phase, reason: params.reason });
+        else if (params.action === 'integrate') result = store.integrate(params.runId);
+        else if (params.action === 'complete') result = store.complete(params.runId);
+        else throw new Error('Unknown workflow action.');
+      }
+      return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }], details: result };
+    },
+  });
+
+  pi.registerTool({
+    name: 'workflow_tab', label: 'Open interactive task tab',
+    description: 'Herdr 내부에서 명시한 workspace에 새 대화형 보조 세션을 엽니다. 기존 headless job을 이동하지 않으며 탭 결과를 승인 근거로 자동 등록하지 않습니다.',
+    parameters: Type.Object({ workspaceId: Type.String(), cwd: Type.String(), label: Type.String(),
+      role: Type.Union([Type.Literal('worker'), Type.Literal('codex-worker'), Type.Literal('reviewer'), Type.Literal('escalation')]),
+      brief: Type.String() }),
+    async execute(_id, params, signal, _onUpdate, ctx) {
+      requireLead(); assertConfiguredRole(ctx); signal?.throwIfAborted();
+      const launch = buildLaunch({ role: params.role, cwd: params.cwd, brief: path.resolve(ctx.cwd, params.brief), configCwd: configCwd(ctx) });
+      try {
+        const result = await createHerdrTaskTab({ workspaceId: params.workspaceId, cwd: params.cwd, label: params.label, launch });
+        return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }], details: result };
+      } catch (error) {
+        if (!error.createdTab) throw error;
+        const details = { error: error.message, stage: error.stage, createdTab: error.createdTab };
+        return { isError: true, content: [{ type: 'text', text: JSON.stringify(details, null, 2) }], details };
+      }
     },
   });
 
